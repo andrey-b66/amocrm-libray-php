@@ -9,7 +9,7 @@
 PHP 8.1+ с расширениями `curl` и `json`.
 
 ```bash
-composer install
+composer install integrat/amocrm
 ```
 
 ```php
