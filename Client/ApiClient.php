@@ -16,18 +16,27 @@ use InvalidArgumentException;
  *
  * Пример: $amocrm->raw()->get('api/v4/events', 'filter[entity][0]=lead&limit=50')
  * Пример: $amocrm->raw()->delete('api/v4/leads/notes/' . $noteId)
+ * Пример: $amocrm->raw()->getMany('api/v4/leads', ['page=1&limit=250', 'page=2&limit=250'])
  */
 final class ApiClient
 {
+    /** Сколько запросов getMany() отправляет одновременно, если не задано иное. */
+    public const DEFAULT_REQUESTS_AT_ONCE = 3;
+
     private string $baseUrl;
     private string $token;
+    private int $requestsAtOnce;
 
-    public function __construct(string $domain, string $longLivedToken)
-    {
+    public function __construct(
+        string $domain,
+        string $longLivedToken,
+        int $requestsAtOnce = self::DEFAULT_REQUESTS_AT_ONCE,
+    ) {
         $domain = strtolower(trim($domain));
         $domain = preg_replace('#^https?://#', '', $domain) ?? $domain;
         $domain = trim($domain, '/');
         $this->token = trim($longLivedToken);
+        $this->requestsAtOnce = $requestsAtOnce;
 
         if ($domain === '') {
             throw new InvalidArgumentException('Указан некорректный домен аккаунта amoCRM.');
@@ -35,6 +44,10 @@ final class ApiClient
 
         if ($this->token === '') {
             throw new InvalidArgumentException('Долгосрочный токен amoCRM не должен быть пустым.');
+        }
+
+        if ($requestsAtOnce < 1) {
+            throw new InvalidArgumentException('Одновременных запросов к amoCRM должно быть не меньше одного.');
         }
 
         $this->baseUrl = "https://$domain/";
@@ -66,11 +79,145 @@ final class ApiClient
     }
 
     /**
+     * Выполнить несколько GET-запросов к одному эндпоинту одновременно.
+     *
+     * Запросы уходят пачками — сколько штук за раз, задаёт третий аргумент
+     * конструктора. Пачка занимает столько времени, сколько самый долгий ответ
+     * в ней; следующая уходит, когда пришли все ответы предыдущей. Ключи
+     * входного массива сохраняются, порядок результата — тот же, что у
+     * переданных запросов.
+     *
+     * Повторных попыток нет: amoCRM разрешает не больше 7 запросов в секунду на
+     * аккаунт, при превышении запрос падает с ApiException и кодом 429.
+     *
+     * Пример: getMany('api/v4/leads', [1 => 'page=1&limit=250', 2 => 'page=2&limit=250'])
+     *
+     * @param array<array-key, string> $queries строки параметров, как в адресной строке браузера
+     * @return array<array-key, array> разобранные ответы amoCRM под теми же ключами
+     */
+    public function getMany(string $endpoint, array $queries): array
+    {
+        $responses = [];
+
+        foreach (array_chunk($queries, $this->requestsAtOnce, true) as $batch) {
+            foreach ($this->sendBatch($endpoint, $batch) as $key => $response) {
+                $responses[$key] = $response;
+            }
+        }
+
+        return $responses;
+    }
+
+    /**
+     * Отправить пачку GET-запросов разом и вернуть разобранные ответы.
+     *
+     * @param array<array-key, string> $queries
+     * @return array<array-key, array>
+     */
+    private function sendBatch(string $endpoint, array $queries): array
+    {
+        if ($queries === []) {
+            return [];
+        }
+
+        $multiHandle = curl_multi_init();
+        $handles = [];
+
+        foreach ($queries as $key => $query) {
+            $curl = curl_init();
+            curl_setopt_array($curl, $this->curlOptions('GET', $this->buildUrl($endpoint, $query), []));
+            curl_multi_add_handle($multiHandle, $curl);
+            $handles[$key] = $curl;
+        }
+
+        do {
+            $multiStatus = curl_multi_exec($multiHandle, $running);
+
+            // Ждём готовности сокетов, а не крутим цикл вхолостую на процессоре.
+            if ($running && curl_multi_select($multiHandle, 1.0) === -1) {
+                usleep(1000);
+            }
+        } while ($running && $multiStatus === CURLM_OK);
+
+        // Итог каждого запроса лежит в очереди сообщений: у отдельного
+        // дескриптора после curl_multi_exec() curl_error() бывает пустым даже
+        // тогда, когда соединение не состоялось.
+        $curlCodes = [];
+
+        while (($message = curl_multi_info_read($multiHandle)) !== false) {
+            if ($message['msg'] === CURLMSG_DONE) {
+                $curlCodes[spl_object_id($message['handle'])] = (int) $message['result'];
+            }
+        }
+
+        $rawResponses = [];
+
+        // Дескрипторы закрываем все до единого и только потом разбираем ответы:
+        // иначе ошибка на первой же странице оставила бы остальные висеть.
+        foreach ($handles as $key => $curl) {
+            $curlCode = $curlCodes[spl_object_id($curl)] ?? CURLE_OK;
+            $error = curl_error($curl);
+
+            if ($error === '' && $curlCode !== CURLE_OK) {
+                $error = curl_strerror($curlCode) ?? 'Ошибка cURL ' . $curlCode;
+            }
+
+            $rawResponses[$key] = [
+                'body' => $curlCode === CURLE_OK ? curl_multi_getcontent($curl) : false,
+                'statusCode' => (int) curl_getinfo($curl, CURLINFO_RESPONSE_CODE),
+                'error' => $error,
+            ];
+
+            curl_multi_remove_handle($multiHandle, $curl);
+            curl_close($curl);
+        }
+
+        curl_multi_close($multiHandle);
+
+        if ($multiStatus !== CURLM_OK) {
+            throw new ApiException(
+                'Не удалось выполнить параллельные запросы к amoCRM. ' . curl_multi_strerror($multiStatus),
+                0,
+                'GET',
+                $endpoint,
+            );
+        }
+
+        $responses = [];
+
+        foreach ($rawResponses as $key => $rawResponse) {
+            $responses[$key] = $this->parseResponse(
+                $rawResponse['statusCode'],
+                $rawResponse['body'],
+                $rawResponse['error'],
+                'GET',
+                $endpoint,
+            );
+        }
+
+        return $responses;
+    }
+
+    /**
      * Выполнить запрос и вернуть разобранный ответ amoCRM.
      *
      * $query — обычная строка параметров, как в адресной строке браузера.
      */
     private function send(string $method, string $endpoint, array $data, string $query): array
+    {
+        $curl = curl_init();
+        curl_setopt_array($curl, $this->curlOptions($method, $this->buildUrl($endpoint, $query), $data));
+
+        $body = curl_exec($curl);
+        $statusCode = (int) curl_getinfo($curl, CURLINFO_RESPONSE_CODE);
+        $error = curl_error($curl);
+        curl_close($curl);
+
+        return $this->parseResponse($statusCode, $body, $error, $method, $endpoint);
+    }
+
+    /** Собрать полный адрес запроса из эндпоинта и строки параметров. */
+    private function buildUrl(string $endpoint, string $query): string
     {
         $url = $this->baseUrl . ltrim(trim($endpoint), '/');
         $query = trim(trim($query), '?&');
@@ -85,7 +232,12 @@ final class ApiClient
             );
         }
 
-        $curl = curl_init();
+        return $url;
+    }
+
+    /** Настройки cURL для одного запроса — одинаковые для обычного и параллельного вызова. */
+    private function curlOptions(string $method, string $url, array $data): array
+    {
         $options = [
             CURLOPT_URL => $url,
             CURLOPT_CUSTOMREQUEST => $method,
@@ -106,14 +258,18 @@ final class ApiClient
             );
         }
 
-        curl_setopt_array($curl, $options);
+        return $options;
+    }
 
-        $body = curl_exec($curl);
-        $statusCode = (int) curl_getinfo($curl, CURLINFO_RESPONSE_CODE);
-        $error = curl_error($curl);
-        curl_close($curl);
-
-        if ($body === false) {
+    /** Разобрать ответ amoCRM или бросить ApiException. */
+    private function parseResponse(
+        int $statusCode,
+        string|bool|null $body,
+        string $error,
+        string $method,
+        string $endpoint,
+    ): array {
+        if ($body === false || $body === null || $error !== '') {
             throw new ApiException(
                 'Не удалось выполнить запрос к amoCRM. ' . $error,
                 0,
@@ -122,7 +278,7 @@ final class ApiClient
             );
         }
 
-        $responseData = json_decode((string) $body, true);
+        $responseData = json_decode($body, true);
 
         if (!is_array($responseData)) {
             $responseData = [];

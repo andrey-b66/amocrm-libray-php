@@ -88,6 +88,45 @@ abstract class AbstractApiRepository
     }
 
     /**
+     * Получить сразу несколько страниц — запросы к amoCRM уходят одновременно.
+     *
+     * Возвращает массив «номер страницы => список сущностей» в порядке
+     * переданных номеров. Пустой список означает, что страница вышла за край
+     * выборки: дальше данных нет. Сколько запросов уходит за раз, задаётся
+     * третьим аргументом конструктора фасада.
+     *
+     * Порядок выдачи между запросами amoCRM не закрепляет, поэтому для
+     * постраничной выгрузки в запрос стоит добавить `order[id]=asc`: иначе
+     * сделка, изменившаяся во время обхода, может попасть в две страницы сразу
+     * или не попасть ни в одну.
+     *
+     * Пример: findPages('filter[status_id][0]=143&order[id]=asc', [1, 2, 3])
+     *
+     * @param int[] $pages номера страниц, нумерация с единицы
+     * @return array<int, array>
+     */
+    public function findPages(
+        string $query,
+        array $pages,
+        int $limit = self::MAX_PAGE_SIZE,
+    ): array {
+        $queries = [];
+
+        foreach ($pages as $page) {
+            $page = (int) $page;
+            $queries[$page] = $this->buildListQuery($query, $page, $limit);
+        }
+
+        $entitiesByPage = [];
+
+        foreach ($this->request->getMany($this->endpoint(), $queries) as $page => $response) {
+            $entitiesByPage[$page] = array_values($response['_embedded'][$this->embeddedKey()] ?? []);
+        }
+
+        return $entitiesByPage;
+    }
+
+    /**
      * Получить все сущности по запросу, обходя страницы автоматически.
      *
      * Страницы читаются по 250 штук, пока amoCRM отдаёт ссылку `_links.next`.

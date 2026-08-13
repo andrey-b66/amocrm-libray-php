@@ -18,6 +18,11 @@ require __DIR__ . '/vendor/autoload.php';
 use Amocrm\Facade\Amocrm;
 
 $amocrm = new Amocrm('example.amocrm.ru', $longLivedToken);
+
+// Третий аргумент — сколько запросов уходит одновременно при параллельном
+// чтении страниц (findPages). По умолчанию три: amoCRM принимает не больше
+// 7 запросов в секунду на аккаунт.
+$amocrm = new Amocrm('example.amocrm.ru', $longLivedToken, 5);
 ```
 
 Для переноса в другой проект: `"autoload": { "psr-4": { "Amocrm\\": "путь/до/Amocrm/" } }`.
@@ -33,6 +38,10 @@ $leads = $amocrm->leads()->find('filter[pipeline_id][0]=10739150&filter[status_i
 
 // Все страницы по 250 обходятся сами.
 $leads = $amocrm->leads()->findAll('filter[created_at][from]=1753747200&with=contacts');
+
+// Несколько страниц разом: запросы уходят одновременно, ответ — «страница => сделки».
+// Пустая страница означает, что данные кончились.
+$leadsByPage = $amocrm->leads()->findPages('filter[status_id][0]=143&order[id]=asc', [1, 2, 3]);
 
 $contact = $amocrm->contacts()->findById($contactId, 'leads,companies');
 $contacts = $amocrm->contacts()->findByIds([10, 20, 30]);
