@@ -20,23 +20,18 @@ use InvalidArgumentException;
  */
 final class ApiClient
 {
-    /** Сколько запросов getMany() отправляет одновременно, если не задано иное. */
-    public const DEFAULT_REQUESTS_AT_ONCE = 3;
+    /** Лимит amoCRM: больше семи запросов в секунду на аккаунт не принимается. */
+    public const MAX_REQUESTS_AT_ONCE = 7;
 
     private string $baseUrl;
     private string $token;
-    private int $requestsAtOnce;
 
-    public function __construct(
-        string $domain,
-        string $longLivedToken,
-        int $requestsAtOnce = self::DEFAULT_REQUESTS_AT_ONCE,
-    ) {
+    public function __construct(string $domain, string $longLivedToken)
+    {
         $domain = strtolower(trim($domain));
         $domain = preg_replace('#^https?://#', '', $domain) ?? $domain;
         $domain = trim($domain, '/');
         $this->token = trim($longLivedToken);
-        $this->requestsAtOnce = $requestsAtOnce;
 
         if ($domain === '') {
             throw new InvalidArgumentException('Указан некорректный домен аккаунта amoCRM.');
@@ -44,10 +39,6 @@ final class ApiClient
 
         if ($this->token === '') {
             throw new InvalidArgumentException('Долгосрочный токен amoCRM не должен быть пустым.');
-        }
-
-        if ($requestsAtOnce < 1) {
-            throw new InvalidArgumentException('Одновременных запросов к amoCRM должно быть не меньше одного.');
         }
 
         $this->baseUrl = "https://$domain/";
@@ -81,14 +72,13 @@ final class ApiClient
     /**
      * Выполнить несколько GET-запросов к одному эндпоинту одновременно.
      *
-     * Запросы уходят пачками — сколько штук за раз, задаёт третий аргумент
-     * конструктора. Пачка занимает столько времени, сколько самый долгий ответ
-     * в ней; следующая уходит, когда пришли все ответы предыдущей. Ключи
-     * входного массива сохраняются, порядок результата — тот же, что у
-     * переданных запросов.
+     * Сколько запросов передали, столько и уйдёт разом: вызов занимает столько
+     * времени, сколько самый долгий ответ. Ключи входного массива сохраняются,
+     * порядок результата — тот же, что у переданных запросов.
      *
-     * Повторных попыток нет: amoCRM разрешает не больше 7 запросов в секунду на
-     * аккаунт, при превышении запрос падает с ApiException и кодом 429.
+     * Больше MAX_REQUESTS_AT_ONCE запросов за раз не принимается: amoCRM
+     * разрешает не больше семи в секунду на аккаунт. Повторных попыток нет —
+     * при превышении лимита ответ приходит как ApiException с кодом 429.
      *
      * Пример: getMany('api/v4/leads', [1 => 'page=1&limit=250', 2 => 'page=2&limit=250'])
      *
@@ -97,27 +87,15 @@ final class ApiClient
      */
     public function getMany(string $endpoint, array $queries): array
     {
-        $responses = [];
-
-        foreach (array_chunk($queries, $this->requestsAtOnce, true) as $batch) {
-            foreach ($this->sendBatch($endpoint, $batch) as $key => $response) {
-                $responses[$key] = $response;
-            }
-        }
-
-        return $responses;
-    }
-
-    /**
-     * Отправить пачку GET-запросов разом и вернуть разобранные ответы.
-     *
-     * @param array<array-key, string> $queries
-     * @return array<array-key, array>
-     */
-    private function sendBatch(string $endpoint, array $queries): array
-    {
         if ($queries === []) {
             return [];
+        }
+
+        if (count($queries) > self::MAX_REQUESTS_AT_ONCE) {
+            throw new InvalidArgumentException(
+                'За раз amoCRM принимает не больше ' . self::MAX_REQUESTS_AT_ONCE
+                . ' запросов, передано ' . count($queries) . '.',
+            );
         }
 
         $multiHandle = curl_multi_init();

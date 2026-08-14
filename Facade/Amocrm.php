@@ -23,26 +23,16 @@ use Amocrm\Repository\User;
  * репозитории, использующие один и тот же авторизованный клиент. Репозитории
  * принимают и возвращают обычные массивы формата amoCRM API v4.
  *
- * Третий аргумент — сколько запросов уходит одновременно при параллельном
- * чтении страниц (findPages, getMany). Обычные методы он не затрагивает: они
- * как и раньше делают один запрос за раз. По умолчанию три — с запасом под
- * лимит amoCRM в 7 запросов в секунду на аккаунт; выше поднимать стоит,
- * только если аккаунт этот темп выдерживает.
- *
  * Пример: $amocrm = new Amocrm('example.amocrm.ru', $longLivedToken);
  *         $leads = $amocrm->leads()->findAll('filter[status_id][0]=143');
- * Пример: $amocrm = new Amocrm('example.amocrm.ru', $longLivedToken, 5);
  */
 final class Amocrm
 {
     private ApiClient $apiClient;
 
-    public function __construct(
-        string $domain,
-        string $longLivedToken,
-        int $requestsAtOnce = ApiClient::DEFAULT_REQUESTS_AT_ONCE,
-    ) {
-        $this->apiClient = new ApiClient($domain, $longLivedToken, $requestsAtOnce);
+    public function __construct(string $domain, string $longLivedToken)
+    {
+        $this->apiClient = new ApiClient($domain, $longLivedToken);
     }
 
     /** Получить репозиторий контактов. */
