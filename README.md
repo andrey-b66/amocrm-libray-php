@@ -131,6 +131,24 @@ $links = $products->findLinksForLead($leadId);     // связи, количес
 Количество бывает дробным — 2.5 килограмма amoCRM примет. Обратно оно приходит
 дробным всегда: в `metadata` лежит `quantity` = 2.0, а не 2.
 
+Цену сделки amoCRM пересчитывает не сразу: сразу после привязки она ещё старая,
+актуальная приходит примерно через секунду.
+
+Страницы товаров и сделок читаются параллельно — `findPages()` отправляет
+запросы разом, до семи за раз.
+
+```php
+$productsByPage = $products->findPages('order[id]=asc', [1, 2, 3]);
+```
+
+Товары сразу многих сделок берут не запросом на каждую сделку, а через
+`with=catalog_elements`: ID товаров и `metadata` с количеством придут прямо в
+сделках, в `_embedded.catalog_elements`.
+
+```php
+$leadsByPage = $amocrm->leads()->findPages('with=catalog_elements&order[id]=desc', [1, 2, 3, 4], 50);
+```
+
 Так же работает любой другой список — счета и пользовательские справочники.
 
 ```php
@@ -157,6 +175,36 @@ $elements->linkToLead($leadId, $elementId);
 ```php
 $events = $amocrm->raw()->get('api/v4/events', 'filter[entity][0]=lead&limit=50');
 $amocrm->raw()->delete('api/v4/leads/notes/' . $noteId);
+```
+
+## Параллельные запросы
+
+Пачка уходит разом и занимает столько времени, сколько самый долгий ответ.
+Больше семи запросов за раз amoCRM не принимает — это её лимит на аккаунт.
+
+```php
+$raw = $amocrm->raw();
+
+// Один эндпоинт, разные параметры.
+$pages = $raw->getMany('api/v4/leads', ['page=1&limit=250', 'page=2&limit=250']);
+
+// Разные эндпоинты и любые методы: postMany, patchMany, putMany, deleteMany.
+$results = $raw->postMany([
+    10 => ['endpoint' => 'api/v4/leads/10/link', 'data' => [$link]],
+    20 => ['endpoint' => 'api/v4/leads/20/link', 'data' => [$link]],
+]);
+```
+
+Ошибка одного запроса не срывает остальные и не приходит исключением: под своим
+ключом вместо ответа лежит `ApiException`, поэтому видно, что записалось, а что
+нет. Повторных попыток нет — упавший запрос отправляют заново сами.
+
+```php
+foreach ($results as $key => $result) {
+    if ($result instanceof ApiException) {
+        continue; // этот не прошёл, остальные прошли
+    }
+}
 ```
 
 ## Ошибки

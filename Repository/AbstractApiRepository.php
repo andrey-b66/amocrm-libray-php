@@ -120,6 +120,11 @@ abstract class AbstractApiRepository
         $entitiesByPage = [];
 
         foreach ($this->request->getMany($this->endpoint(), $queries) as $page => $response) {
+            // Пачка отдаёт ошибку значением, а репозиторий — исключением, как везде.
+            if ($response instanceof ApiException) {
+                throw $response;
+            }
+
             $entitiesByPage[$page] = array_values($response['_embedded'][$this->embeddedKey()] ?? []);
         }
 

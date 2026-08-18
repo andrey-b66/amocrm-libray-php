@@ -14,9 +14,15 @@ use InvalidArgumentException;
  * метода — один запрос с таймаутом 30 секунд, без повторных попыток. Ответ
  * возвращается обычным массивом, любая ошибка приходит как ApiException.
  *
+ * Методы на -Many шлют пачку запросов разом, до семи за раз: getMany() ходит по
+ * одному эндпоинту, остальные принимают запросы с любыми эндпоинтами. Там
+ * ошибка приходит не исключением, а значением в результате — иначе после
+ * упавшего запроса было бы не понять, что из пачки успело записаться.
+ *
  * Пример: $amocrm->raw()->get('api/v4/events', 'filter[entity][0]=lead&limit=50')
  * Пример: $amocrm->raw()->delete('api/v4/leads/notes/' . $noteId)
  * Пример: $amocrm->raw()->getMany('api/v4/leads', ['page=1&limit=250', 'page=2&limit=250'])
+ * Пример: $amocrm->raw()->postMany([['endpoint' => 'api/v4/leads/10/link', 'data' => [$link]]])
  */
 final class ApiClient
 {
@@ -76,34 +82,128 @@ final class ApiClient
      * времени, сколько самый долгий ответ. Ключи входного массива сохраняются,
      * порядок результата — тот же, что у переданных запросов.
      *
-     * Больше MAX_REQUESTS_AT_ONCE запросов за раз не принимается: amoCRM
-     * разрешает не больше семи в секунду на аккаунт. Повторных попыток нет —
-     * при превышении лимита ответ приходит как ApiException с кодом 429.
-     *
      * Пример: getMany('api/v4/leads', [1 => 'page=1&limit=250', 2 => 'page=2&limit=250'])
      *
      * @param array<array-key, string> $queries строки параметров, как в адресной строке браузера
-     * @return array<array-key, array> разобранные ответы amoCRM под теми же ключами
+     * @return array<array-key, array|ApiException> ответы amoCRM под теми же ключами
      */
     public function getMany(string $endpoint, array $queries): array
     {
-        if ($queries === []) {
+        $requests = [];
+
+        foreach ($queries as $key => $query) {
+            $requests[$key] = ['endpoint' => $endpoint, 'query' => $query];
+        }
+
+        return $this->sendMany('GET', $requests);
+    }
+
+    /**
+     * Выполнить несколько POST-запросов одновременно.
+     *
+     * Нужен там, где эндпоинты разные: привязать товар к семи сделкам, создать
+     * примечания в разных сущностях. Однотипные записи в один и тот же эндпоинт
+     * amoCRM принимает пачкой в теле обычного post() — 250 сделок одним
+     * запросом вместо семи параллельных, и лимит запросов не тратится.
+     *
+     * Пример: postMany([
+     *     10 => ['endpoint' => 'api/v4/leads/10/link', 'data' => [$link]],
+     *     20 => ['endpoint' => 'api/v4/leads/20/link', 'data' => [$link]],
+     * ])
+     *
+     * @param array<array-key, array{endpoint: string, data?: array, query?: string}> $requests
+     * @return array<array-key, array|ApiException> ответы amoCRM под теми же ключами
+     */
+    public function postMany(array $requests): array
+    {
+        return $this->sendMany('POST', $requests);
+    }
+
+    /**
+     * Выполнить несколько PATCH-запросов одновременно.
+     *
+     * Пример: patchMany([
+     *     10 => ['endpoint' => 'api/v4/leads/10', 'data' => ['price' => 1000]],
+     *     20 => ['endpoint' => 'api/v4/leads/20', 'data' => ['price' => 2000]],
+     * ])
+     *
+     * @param array<array-key, array{endpoint: string, data?: array, query?: string}> $requests
+     * @return array<array-key, array|ApiException> ответы amoCRM под теми же ключами
+     */
+    public function patchMany(array $requests): array
+    {
+        return $this->sendMany('PATCH', $requests);
+    }
+
+    /**
+     * Выполнить несколько PUT-запросов одновременно.
+     *
+     * @param array<array-key, array{endpoint: string, data?: array, query?: string}> $requests
+     * @return array<array-key, array|ApiException> ответы amoCRM под теми же ключами
+     */
+    public function putMany(array $requests): array
+    {
+        return $this->sendMany('PUT', $requests);
+    }
+
+    /**
+     * Выполнить несколько DELETE-запросов одновременно.
+     *
+     * @param array<array-key, array{endpoint: string, data?: array, query?: string}> $requests
+     * @return array<array-key, array|ApiException> ответы amoCRM под теми же ключами
+     */
+    public function deleteMany(array $requests): array
+    {
+        return $this->sendMany('DELETE', $requests);
+    }
+
+    /**
+     * Выполнить пачку запросов одним HTTP-методом одновременно.
+     *
+     * Больше MAX_REQUESTS_AT_ONCE запросов за раз не принимается: amoCRM
+     * разрешает не больше семи в секунду на аккаунт. Повторных попыток нет.
+     *
+     * Упавший запрос не срывает остальные: под его ключом в результате лежит
+     * ApiException вместо ответа — по нему видно, что именно не прошло, а что
+     * записалось. Исключение бросается, только если не задалась вся пачка.
+     *
+     * @param array<array-key, array{endpoint: string, data?: array, query?: string}> $requests
+     * @return array<array-key, array|ApiException>
+     */
+    private function sendMany(string $method, array $requests): array
+    {
+        if ($requests === []) {
             return [];
         }
 
-        if (count($queries) > self::MAX_REQUESTS_AT_ONCE) {
+        if (count($requests) > self::MAX_REQUESTS_AT_ONCE) {
             throw new InvalidArgumentException(
                 'За раз amoCRM принимает не больше ' . self::MAX_REQUESTS_AT_ONCE
-                . ' запросов, передано ' . count($queries) . '.',
+                . ' запросов, передано ' . count($requests) . '.',
             );
         }
 
         $multiHandle = curl_multi_init();
         $handles = [];
+        $endpoints = [];
 
-        foreach ($queries as $key => $query) {
+        foreach ($requests as $key => $request) {
+            $endpoint = $request['endpoint'] ?? null;
+
+            if (!is_string($endpoint) || trim($endpoint) === '') {
+                throw new InvalidArgumentException(
+                    'В параллельном запросе ' . $key . ' не указан эндпоинт amoCRM.',
+                );
+            }
+
+            $endpoints[$key] = $endpoint;
+
             $curl = curl_init();
-            curl_setopt_array($curl, $this->curlOptions('GET', $this->buildUrl($endpoint, $query), []));
+            curl_setopt_array($curl, $this->curlOptions(
+                $method,
+                $this->buildUrl($endpoint, (string) ($request['query'] ?? '')),
+                (array) ($request['data'] ?? []),
+            ));
             curl_multi_add_handle($multiHandle, $curl);
             $handles[$key] = $curl;
         }
@@ -131,7 +231,7 @@ final class ApiClient
         $rawResponses = [];
 
         // Дескрипторы закрываем все до единого и только потом разбираем ответы:
-        // иначе ошибка на первой же странице оставила бы остальные висеть.
+        // иначе ошибка на первом же запросе оставила бы остальные висеть.
         foreach ($handles as $key => $curl) {
             $curlCode = $curlCodes[spl_object_id($curl)] ?? CURLE_OK;
             $error = curl_error($curl);
@@ -156,21 +256,26 @@ final class ApiClient
             throw new ApiException(
                 'Не удалось выполнить параллельные запросы к amoCRM. ' . curl_multi_strerror($multiStatus),
                 0,
-                'GET',
-                $endpoint,
+                $method,
+                implode(', ', array_unique($endpoints)),
             );
         }
 
         $responses = [];
 
         foreach ($rawResponses as $key => $rawResponse) {
-            $responses[$key] = $this->parseResponse(
-                $rawResponse['statusCode'],
-                $rawResponse['body'],
-                $rawResponse['error'],
-                'GET',
-                $endpoint,
-            );
+            try {
+                $responses[$key] = $this->parseResponse(
+                    $rawResponse['statusCode'],
+                    $rawResponse['body'],
+                    $rawResponse['error'],
+                    $method,
+                    $endpoints[$key],
+                );
+            } catch (ApiException $exception) {
+                // Ошибка одного запроса не отменяет уже полученные ответы.
+                $responses[$key] = $exception;
+            }
         }
 
         return $responses;
