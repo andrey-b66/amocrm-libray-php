@@ -94,6 +94,64 @@ $amocrm->tags()->removeFromEntity('leads', $leadId, [$tag['id']]);
 $amocrm->tags()->clearForEntity('leads', $leadId);
 ```
 
+## Товары и списки
+
+Товары — элементы служебного списка с типом `products`, репозиторий находит его
+сам. Цена, артикул и остаток лежат в `custom_fields_values` обычными полями.
+
+```php
+$products = $amocrm->catalogs()->products();
+
+$product = $products->create(['name' => 'Стул', 'custom_fields_values' => [
+    ['field_id' => $priceFieldId, 'values' => [['value' => 1500]]],
+]]);
+$products->update($product['id'], ['name' => 'Стул офисный']);
+
+$products->findByQuery('Стул');
+$products->findById($product['id']);
+$products->findAll();
+
+// ID полей товара — цены, артикула, остатка.
+$fields = $amocrm->raw()->get('api/v4/catalogs/' . $products->catalogId() . '/custom_fields');
+```
+
+Товар привязывается к сделке с количеством; цену сделки amoCRM пересчитывает
+сама. Второй раз тот же товар в сделке не появится: повторная привязка
+перезаписывает количество, ей же его и меняют.
+
+```php
+$products->linkToLead($leadId, $product['id'], 2);
+$products->linkToLead($leadId, $product['id'], 5); // теперь в сделке 5 штук
+$products->unlinkFromLead($leadId, $product['id']);
+
+$leadProducts = $products->findForLead($leadId);   // сами товары
+$links = $products->findLinksForLead($leadId);     // связи, количество в metadata
+```
+
+Количество бывает дробным — 2.5 килограмма amoCRM примет. Обратно оно приходит
+дробным всегда: в `metadata` лежит `quantity` = 2.0, а не 2.
+
+Так же работает любой другой список — счета и пользовательские справочники.
+
+```php
+$catalogs = $amocrm->catalogs();
+
+$all = $catalogs->findAll();
+$regular = $catalogs->findByType('regular'); // ещё бывают products, invoices, suppliers
+
+$elements = $catalogs->elements($catalogId);
+$elements->create(['name' => 'Строка справочника']);
+$elements->linkToLead($leadId, $elementId);
+```
+
+По элементам списков amoCRM ищет только по ID и полнотекстовым `query`. Фильтр
+по значению поля она не выполняет и не отклоняет — молча отдаёт весь список,
+поэтому `findByField()` у элементов бросает исключение, а не возвращает мусор.
+У самих списков поиска нет вовсе: нужный берут из `findAll()` или `findByType()`.
+
+Удаления товаров, элементов и сделок в API v4 нет — на `DELETE` amoCRM отвечает
+405, чистить приходится в интерфейсе.
+
 ## Произвольные запросы
 
 ```php
