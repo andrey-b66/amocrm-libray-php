@@ -5,19 +5,38 @@ declare(strict_types=1);
 namespace Amocrm\Client;
 
 use Amocrm\Exception\ApiException;
+use GuzzleHttp\Client;
+use GuzzleHttp\Exception\GuzzleException;
+use GuzzleHttp\HandlerStack;
+use GuzzleHttp\Middleware;
+use GuzzleHttp\Pool;
+use GuzzleHttp\Psr7\Request;
 use InvalidArgumentException;
+use Psr\Http\Message\RequestInterface;
+use Psr\Http\Message\ResponseInterface;
+use Throwable;
 
 /**
- * Минимальный HTTP-клиент amoCRM API v4 на обычном cURL.
+ * HTTP-клиент amoCRM API v4 поверх Guzzle.
  *
- * Никаких настроек: домен и долгосрочный токен — всё, что нужно. Один вызов
- * метода — один запрос с таймаутом 30 секунд, без повторных попыток. Ответ
+ * Никаких настроек: домен и долгосрочный токен — всё, что нужно. Ответ
  * возвращается обычным массивом, любая ошибка приходит как ApiException.
  *
- * Методы на -Many шлют пачку запросов разом, до семи за раз: getMany() ходит по
- * одному эндпоинту, остальные принимают запросы с любыми эндпоинтами. Там
- * ошибка приходит не исключением, а значением в результате — иначе после
- * упавшего запроса было бы не понять, что из пачки успело записаться.
+ * Запрос, упавший по временной причине, повторяется сам — до шести раз, с
+ * паузой, которая удваивается: 1, 2, 4, 8, 16, 32 секунды. Столько ожидания
+ * нужно потому, что превышенный лимит запросов amoCRM держит не мгновение.
+ *
+ * Что считается временным, зависит от метода. HTTP 429 повторяется всегда:
+ * amoCRM отклоняет такой запрос целиком и записать ничего не успевает. Обрыв
+ * связи и ошибки 5xx повторяются только у GET — у записи ответ мог потеряться
+ * уже после того, как amoCRM всё создала, и повтор завёл бы вторую копию.
+ *
+ * Методы на -Many шлют пачку запросов: getMany() ходит по одному эндпоинту,
+ * остальные принимают запросы с любыми эндпоинтами. Передавать можно сколько
+ * угодно — в полёте всё равно держится не больше MAX_REQUESTS_AT_ONCE, а
+ * освободившееся место сразу занимает следующий запрос. Ошибка приходит не
+ * исключением, а значением в результате: иначе после упавшего запроса было бы
+ * не понять, что из пачки успело записаться.
  *
  * Пример: $amocrm->raw()->get('api/v4/events', 'filter[entity][0]=lead&limit=50')
  * Пример: $amocrm->raw()->delete('api/v4/leads/notes/' . $noteId)
@@ -29,25 +48,44 @@ final class ApiClient
     /** Лимит amoCRM: больше семи запросов в секунду на аккаунт не принимается. */
     public const MAX_REQUESTS_AT_ONCE = 7;
 
+    /** Сколько раз повторять запрос, упавший по временной причине. */
+    private const RETRY_ATTEMPTS = 6;
+
+    /** Пауза перед первым повтором в миллисекундах; дальше удваивается. */
+    private const RETRY_BASE_DELAY_MS = 1000;
+
     private string $baseUrl;
-    private string $token;
+    private Client $http;
 
     public function __construct(string $domain, string $longLivedToken)
     {
         $domain = strtolower(trim($domain));
         $domain = preg_replace('#^https?://#', '', $domain) ?? $domain;
         $domain = trim($domain, '/');
-        $this->token = trim($longLivedToken);
+        $token = trim($longLivedToken);
 
         if ($domain === '') {
             throw new InvalidArgumentException('Указан некорректный домен аккаунта amoCRM.');
         }
 
-        if ($this->token === '') {
+        if ($token === '') {
             throw new InvalidArgumentException('Долгосрочный токен amoCRM не должен быть пустым.');
         }
 
         $this->baseUrl = "https://$domain/";
+        $this->http = new Client([
+            'handler' => $this->handlerStack(),
+            // Без таймаута зависший ответ amoCRM держал бы скрипт до лимита выполнения.
+            'timeout' => 30,
+            // Коды ошибок разбираем сами: в теле ответа amoCRM лежит `detail`,
+            // а исключение Guzzle его бы спрятало.
+            'http_errors' => false,
+            'headers' => [
+                'Authorization' => 'Bearer ' . $token,
+                'Content-Type' => 'application/json',
+                'Accept' => 'application/json',
+            ],
+        ]);
     }
 
     public function get(string $endpoint, string $query = ''): array
@@ -78,9 +116,8 @@ final class ApiClient
     /**
      * Выполнить несколько GET-запросов к одному эндпоинту одновременно.
      *
-     * Сколько запросов передали, столько и уйдёт разом: вызов занимает столько
-     * времени, сколько самый долгий ответ. Ключи входного массива сохраняются,
-     * порядок результата — тот же, что у переданных запросов.
+     * Ключи входного массива сохраняются, порядок результата — тот же, что у
+     * переданных запросов.
      *
      * Пример: getMany('api/v4/leads', [1 => 'page=1&limit=250', 2 => 'page=2&limit=250'])
      *
@@ -158,14 +195,17 @@ final class ApiClient
     }
 
     /**
-     * Выполнить пачку запросов одним HTTP-методом одновременно.
+     * Выполнить пачку запросов одним HTTP-методом.
      *
-     * Больше MAX_REQUESTS_AT_ONCE запросов за раз не принимается: amoCRM
-     * разрешает не больше семи в секунду на аккаунт. Повторных попыток нет.
+     * В полёте держится не больше MAX_REQUESTS_AT_ONCE запросов: столько
+     * amoCRM разрешает на аккаунт. Как только один ответ пришёл, его место
+     * занимает следующий запрос очереди, поэтому пачка любой длины идёт без
+     * простоя — ждать всю семёрку, чтобы отправить восьмой, не приходится.
      *
      * Упавший запрос не срывает остальные: под его ключом в результате лежит
      * ApiException вместо ответа — по нему видно, что именно не прошло, а что
-     * записалось. Исключение бросается, только если не задалась вся пачка.
+     * записалось. Повторы делаются на уровне каждого запроса отдельно, ответы
+     * соседей при этом не теряются и второй раз не отправляются.
      *
      * @param array<array-key, array{endpoint: string, data?: array, query?: string}> $requests
      * @return array<array-key, array|ApiException>
@@ -176,16 +216,8 @@ final class ApiClient
             return [];
         }
 
-        if (count($requests) > self::MAX_REQUESTS_AT_ONCE) {
-            throw new InvalidArgumentException(
-                'За раз amoCRM принимает не больше ' . self::MAX_REQUESTS_AT_ONCE
-                . ' запросов, передано ' . count($requests) . '.',
-            );
-        }
-
-        $multiHandle = curl_multi_init();
-        $handles = [];
         $endpoints = [];
+        $httpRequests = [];
 
         foreach ($requests as $key => $request) {
             $endpoint = $request['endpoint'] ?? null;
@@ -197,88 +229,49 @@ final class ApiClient
             }
 
             $endpoints[$key] = $endpoint;
-
-            $curl = curl_init();
-            curl_setopt_array($curl, $this->curlOptions(
+            $httpRequests[$key] = $this->buildRequest(
                 $method,
-                $this->buildUrl($endpoint, (string) ($request['query'] ?? '')),
+                $endpoint,
                 (array) ($request['data'] ?? []),
-            ));
-            curl_multi_add_handle($multiHandle, $curl);
-            $handles[$key] = $curl;
-        }
-
-        do {
-            $multiStatus = curl_multi_exec($multiHandle, $running);
-
-            // Ждём готовности сокетов, а не крутим цикл вхолостую на процессоре.
-            if ($running && curl_multi_select($multiHandle, 1.0) === -1) {
-                usleep(1000);
-            }
-        } while ($running && $multiStatus === CURLM_OK);
-
-        // Итог каждого запроса лежит в очереди сообщений: у отдельного
-        // дескриптора после curl_multi_exec() curl_error() бывает пустым даже
-        // тогда, когда соединение не состоялось.
-        $curlCodes = [];
-
-        while (($message = curl_multi_info_read($multiHandle)) !== false) {
-            if ($message['msg'] === CURLMSG_DONE) {
-                $curlCodes[spl_object_id($message['handle'])] = (int) $message['result'];
-            }
-        }
-
-        $rawResponses = [];
-
-        // Дескрипторы закрываем все до единого и только потом разбираем ответы:
-        // иначе ошибка на первом же запросе оставила бы остальные висеть.
-        foreach ($handles as $key => $curl) {
-            $curlCode = $curlCodes[spl_object_id($curl)] ?? CURLE_OK;
-            $error = curl_error($curl);
-
-            if ($error === '' && $curlCode !== CURLE_OK) {
-                $error = curl_strerror($curlCode) ?? 'Ошибка cURL ' . $curlCode;
-            }
-
-            $rawResponses[$key] = [
-                'body' => $curlCode === CURLE_OK ? curl_multi_getcontent($curl) : false,
-                'statusCode' => (int) curl_getinfo($curl, CURLINFO_RESPONSE_CODE),
-                'error' => $error,
-            ];
-
-            curl_multi_remove_handle($multiHandle, $curl);
-            curl_close($curl);
-        }
-
-        curl_multi_close($multiHandle);
-
-        if ($multiStatus !== CURLM_OK) {
-            throw new ApiException(
-                'Не удалось выполнить параллельные запросы к amoCRM. ' . curl_multi_strerror($multiStatus),
-                0,
-                $method,
-                implode(', ', array_unique($endpoints)),
+                (string) ($request['query'] ?? ''),
             );
         }
 
         $responses = [];
 
-        foreach ($rawResponses as $key => $rawResponse) {
-            try {
-                $responses[$key] = $this->parseResponse(
-                    $rawResponse['statusCode'],
-                    $rawResponse['body'],
-                    $rawResponse['error'],
-                    $method,
-                    $endpoints[$key],
-                );
-            } catch (ApiException $exception) {
-                // Ошибка одного запроса не отменяет уже полученные ответы.
-                $responses[$key] = $exception;
-            }
+        $pool = new Pool($this->http, $httpRequests, [
+            'concurrency' => self::MAX_REQUESTS_AT_ONCE,
+            'fulfilled' => function (ResponseInterface $response, mixed $key) use (
+                &$responses,
+                $method,
+                $endpoints,
+            ): void {
+                try {
+                    $responses[$key] = $this->parseResponse($response, $method, $endpoints[$key]);
+                } catch (ApiException $exception) {
+                    // Ошибка одного запроса не отменяет уже полученные ответы.
+                    $responses[$key] = $exception;
+                }
+            },
+            'rejected' => function (Throwable $reason, mixed $key) use (
+                &$responses,
+                $method,
+                $endpoints,
+            ): void {
+                $responses[$key] = $this->connectionFailed($reason, $method, $endpoints[$key]);
+            },
+        ]);
+
+        $pool->promise()->wait();
+
+        // Порядок результата — тот же, что у переданных запросов.
+        $ordered = [];
+
+        foreach (array_keys($requests) as $key) {
+            $ordered[$key] = $responses[$key];
         }
 
-        return $responses;
+        return $ordered;
     }
 
     /**
@@ -288,15 +281,77 @@ final class ApiClient
      */
     private function send(string $method, string $endpoint, array $data, string $query): array
     {
-        $curl = curl_init();
-        curl_setopt_array($curl, $this->curlOptions($method, $this->buildUrl($endpoint, $query), $data));
+        $request = $this->buildRequest($method, $endpoint, $data, $query);
 
-        $body = curl_exec($curl);
-        $statusCode = (int) curl_getinfo($curl, CURLINFO_RESPONSE_CODE);
-        $error = curl_error($curl);
-        curl_close($curl);
+        try {
+            $response = $this->http->send($request);
+        } catch (GuzzleException $exception) {
+            throw $this->connectionFailed($exception, $method, $endpoint);
+        }
 
-        return $this->parseResponse($statusCode, $body, $error, $method, $endpoint);
+        return $this->parseResponse($response, $method, $endpoint);
+    }
+
+    /**
+     * Собрать стек обработчиков Guzzle с повторами.
+     *
+     * Повтор живёт на уровне одного запроса, поэтому одинаково работает и в
+     * обычном вызове, и внутри пачки. В пачке пауза перед повтором не
+     * останавливает соседние запросы: Guzzle откладывает такой запрос и
+     * возвращается к нему сам.
+     */
+    private function handlerStack(): HandlerStack
+    {
+        $stack = HandlerStack::create();
+
+        $stack->push(Middleware::retry(
+            static function (
+                int $retries,
+                RequestInterface $request,
+                ?ResponseInterface $response = null,
+            ): bool {
+                if ($retries >= self::RETRY_ATTEMPTS) {
+                    return false;
+                }
+
+                // Ответа нет вовсе — значит обрыв связи или таймаут.
+                return self::isRetryable($request->getMethod(), $response?->getStatusCode() ?? 0);
+            },
+            // Guzzle нумерует повторы с единицы: 1, 2, 4, 8, 16, 32 секунды.
+            static fn (int $retries): int => self::RETRY_BASE_DELAY_MS * (2 ** ($retries - 1)),
+        ));
+
+        return $stack;
+    }
+
+    /**
+     * Можно ли повторить запрос, упавший с таким кодом.
+     *
+     * HTTP 429 повторяется у любого метода: amoCRM отклоняет такой запрос
+     * целиком, записать ничего не успевает, и повтор ничего не задваивает.
+     *
+     * Обрыв связи (код 0) и ошибки 5xx повторяются только у GET. У записи по
+     * ним не видно, дошла она или нет: ответ мог потеряться уже после того, как
+     * amoCRM всё создала, и повтор завёл бы вторую копию. Такие запросы
+     * отправляет заново вызывающий код — он один знает, чем это грозит.
+     */
+    private static function isRetryable(string $method, int $statusCode): bool
+    {
+        if ($statusCode === 429) {
+            return true;
+        }
+
+        return $method === 'GET' && ($statusCode === 0 || $statusCode >= 500);
+    }
+
+    /** Собрать запрос к amoCRM: адрес, заголовки от клиента и тело в JSON. */
+    private function buildRequest(string $method, string $endpoint, array $data, string $query): Request
+    {
+        $body = $data === []
+            ? null
+            : json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+
+        return new Request($method, $this->buildUrl($endpoint, $query), [], $body);
     }
 
     /** Собрать полный адрес запроса из эндпоинта и строки параметров. */
@@ -307,7 +362,8 @@ final class ApiClient
 
         if ($query !== '') {
             // Пробелы и кириллицу кодируем: сырыми в URL их слать нельзя.
-            // Остальное — `&`, `=`, `[`, `]` — остаётся как написали.
+            // Остальное — `&`, `=`, `[`, `]` — остаётся как написали; квадратные
+            // скобки Guzzle дальше закодирует сам, amoCRM понимает оба вида.
             $url .= '?' . preg_replace_callback(
                 '/[^\x21-\x7e]/',
                 static fn (array $match): string => rawurlencode($match[0]),
@@ -318,50 +374,22 @@ final class ApiClient
         return $url;
     }
 
-    /** Настройки cURL для одного запроса — одинаковые для обычного и параллельного вызова. */
-    private function curlOptions(string $method, string $url, array $data): array
+    /** Запрос не дошёл до amoCRM: обрыв связи, таймаут, неизвестный домен. */
+    private function connectionFailed(Throwable $reason, string $method, string $endpoint): ApiException
     {
-        $options = [
-            CURLOPT_URL => $url,
-            CURLOPT_CUSTOMREQUEST => $method,
-            CURLOPT_RETURNTRANSFER => true,
-            // Без таймаута зависший ответ amoCRM держал бы скрипт до лимита выполнения.
-            CURLOPT_TIMEOUT => 30,
-            CURLOPT_HTTPHEADER => [
-                'Authorization: Bearer ' . $this->token,
-                'Content-Type: application/json',
-                'Accept: application/json',
-            ],
-        ];
-
-        if ($data !== []) {
-            $options[CURLOPT_POSTFIELDS] = json_encode(
-                $data,
-                JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES,
-            );
-        }
-
-        return $options;
+        return new ApiException(
+            'Не удалось выполнить запрос к amoCRM. ' . $reason->getMessage(),
+            0,
+            $method,
+            $endpoint,
+        );
     }
 
     /** Разобрать ответ amoCRM или бросить ApiException. */
-    private function parseResponse(
-        int $statusCode,
-        string|bool|null $body,
-        string $error,
-        string $method,
-        string $endpoint,
-    ): array {
-        if ($body === false || $body === null || $error !== '') {
-            throw new ApiException(
-                'Не удалось выполнить запрос к amoCRM. ' . $error,
-                0,
-                $method,
-                $endpoint,
-            );
-        }
-
-        $responseData = json_decode($body, true);
+    private function parseResponse(ResponseInterface $response, string $method, string $endpoint): array
+    {
+        $statusCode = $response->getStatusCode();
+        $responseData = json_decode((string) $response->getBody(), true);
 
         if (!is_array($responseData)) {
             $responseData = [];

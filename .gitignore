@@ -1,0 +1,20 @@
+# Секреты: домен и долгосрочный токен amoCRM
+env.txt
+.env
+.env.*
+!.env.example
+
+# Зависимости — ставятся composer'ом по composer.json
+/vendor/
+
+# Мусор редакторов и системы
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Логи и временные файлы
+*.log
+*.cache
+.php-cs-fixer.cache
+.phpunit.result.cache
