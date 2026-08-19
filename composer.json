@@ -1,11 +1,9 @@
 {
     "name": "integrat/amocrm",
-    "description": "Минимальный модуль для работы с amoCRM API v4 по долгосрочному токену",
+    "description": "Модуль для работы с amoCRM API v4 по долгосрочному токену",
     "type": "library",
     "require": {
         "php": ">=8.1",
-        "ext-curl": "*",
-        "ext-json": "*",
         "guzzlehttp/guzzle": "^7.9"
     },
     "autoload": {
