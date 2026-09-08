@@ -16,11 +16,11 @@ use BadMethodCallException;
  * свой список сами.
  *
  * Из поиска amoCRM даёт по элементам только фильтр по ID и полнотекстовый
- * `query`: find(), findAll(), findById(), findByIds() и findByQuery() работают,
+ * `query`: find(), findById(), findByIds() и findByQuery() работают,
  * а findByField() — нет, фильтр по значению поля amoCRM для списков не делает.
  *
  * Пример: $elements = $amocrm->catalogs()->elements($catalogId);
- *         $elements->create(['name' => 'Стул', 'custom_fields_values' => [...]]);
+ *         $elements->create([['name' => 'Стул', 'custom_fields_values' => [...]]]);
  */
 class CatalogElement extends AbstractApiRepository
 {

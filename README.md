@@ -1,8 +1,8 @@
 # Модуль amoCRM
 
-Работа с amoCRM API v4 через долгосрочный токен. HTTP на Guzzle: параллельные
-запросы и повторы при временных ошибках достаются оттуда и настройки не
-требуют. Репозитории принимают и возвращают массивы формата API v4,
+Работа с amoCRM API v4 через долгосрочный токен. HTTP на Guzzle: повторы при
+временных ошибках достаются оттуда и настройки не требуют. Запросы уходят по
+одному. Репозитории принимают и возвращают массивы формата API v4,
 подробности и примеры — в докблоках самих методов.
 
 ## Установка
@@ -29,16 +29,15 @@ $amocrm = new Amocrm('example.amocrm.ru', $longLivedToken);
 вставить и целиком URL: всё до `?` отбрасывается.
 
 ```php
-// Одна страница: page и limit задаются аргументами, а не строкой.
-$leads = $amocrm->leads()->find('filter[pipeline_id][0]=10739150&filter[status_id][0]=143', 1, 50);
+// Одна страница: limit задаётся аргументом, а не строкой.
+$leads = $amocrm->leads()->find('filter[pipeline_id][0]=10739150&filter[status_id][0]=143', 50);
 
-// Все страницы по 250 обходятся сами.
-$leads = $amocrm->leads()->findAll('filter[created_at][from]=1753747200&with=contacts');
+// Все страницы по 250 обходятся сами: pages: null — читать до конца выборки.
+$leads = $amocrm->leads()->find('filter[created_at][from]=1753747200&with=contacts', pages: null);
 
-// Несколько страниц разом: страниц можно передать сколько угодно, в полёте
-// держится семь — лимит amoCRM. Ответ — «страница => сделки», пустая страница
-// означает, что данные кончились.
-$leadsByPage = $amocrm->leads()->findPages('filter[status_id][0]=143&order[id]=asc', [1, 2, 3]);
+// Ограниченный обход: три страницы подряд, дальше не идём. Результат — один
+// плоский список сделок, а не разбитый по страницам.
+$leads = $amocrm->leads()->find('filter[status_id][0]=143&order[id]=asc', pages: 3);
 
 $contact = $amocrm->contacts()->findById($contactId, 'leads,companies');
 $contacts = $amocrm->contacts()->findByIds([10, 20, 30]);
@@ -47,15 +46,31 @@ $contacts = $amocrm->contacts()->findByQuery('Ромашка');
 $contacts = $amocrm->contacts()->findByField(123456, 'ООО Ромашка');
 
 $leads = $amocrm->leads()->findActiveByContactId($contactId);
-$pipelines = $amocrm->pipelines()->findAll();
+$pipelines = $amocrm->pipelines()->find(pages: null);
 $users = $amocrm->users()->getActive();
 ```
 
 ## Создание и обновление
 
 ```php
-$contact = $amocrm->contacts()->create(['name' => 'Иван']);
-$amocrm->contacts()->update($contact['id'], ['name' => 'Пётр']);
+// create() принимает список сущностей — как и сама amoCRM. Одна запись это
+// список из одной; в ответ приходят созданные сущности с проставленными id.
+[$contact] = $amocrm->contacts()->create([['name' => 'Иван']]);
+$amocrm->contacts()->update([['id' => $contact['id'], 'name' => 'Пётр']]);
+
+// Пачкой — до 250 в одном запросе, список любой длины бьётся сам. Своё поле
+// request_id amoCRM вернёт обратно: по нему видно, какой id какой записи.
+$created = $amocrm->contacts()->create([
+    ['name' => 'Иван', 'request_id' => '42'],
+    ['name' => 'Пётр', 'request_id' => '43'],
+]);
+
+// update() устроен так же: у каждой сущности свой id внутри данных, остальные
+// поля частичные — меняется только перечисленное.
+$updated = $amocrm->leads()->update([
+    ['id' => 10, 'price' => 1000],
+    ['id' => 20, 'name' => 'Повторная заявка'],
+]);
 
 $amocrm->notes()->createCommon('leads', $leadId, 'Клиент просил перезвонить');
 $notes = $amocrm->notes()->findForEntity('leads', $leadId, 'filter[note_type][0]=common');
@@ -103,14 +118,14 @@ $amocrm->tags()->clearForEntity('leads', $leadId);
 ```php
 $products = $amocrm->catalogs()->products();
 
-$product = $products->create(['name' => 'Стул', 'custom_fields_values' => [
+[$product] = $products->create([['name' => 'Стул', 'custom_fields_values' => [
     ['field_id' => $priceFieldId, 'values' => [['value' => 1500]]],
-]]);
-$products->update($product['id'], ['name' => 'Стул офисный']);
+]]]);
+$products->update([['id' => $product['id'], 'name' => 'Стул офисный']]);
 
 $products->findByQuery('Стул');
 $products->findById($product['id']);
-$products->findAll();
+$products->find(pages: null);
 
 // ID полей товара — цены, артикула, остатка.
 $fields = $amocrm->raw()->get('api/v4/catalogs/' . $products->catalogId() . '/custom_fields');
@@ -135,11 +150,11 @@ $links = $products->findLinksForLead($leadId);     // связи, количес
 Цену сделки amoCRM пересчитывает не сразу: сразу после привязки она ещё старая,
 актуальная приходит примерно через секунду.
 
-Страницы товаров и сделок читаются параллельно — `findPages()` отправляет
-запросы разом, держа в полёте семь.
+Товары читаются тем же `find()`, что и остальные сущности: `pages` задаёт, где
+остановиться.
 
 ```php
-$productsByPage = $products->findPages('order[id]=asc', [1, 2, 3]);
+$products->find('order[id]=asc', pages: 3);
 ```
 
 Товары сразу многих сделок берут не запросом на каждую сделку, а через
@@ -147,7 +162,7 @@ $productsByPage = $products->findPages('order[id]=asc', [1, 2, 3]);
 сделках, в `_embedded.catalog_elements`.
 
 ```php
-$leadsByPage = $amocrm->leads()->findPages('with=catalog_elements&order[id]=desc', [1, 2, 3, 4], 50);
+$leads = $amocrm->leads()->find('with=catalog_elements&order[id]=desc', 50, pages: 4);
 ```
 
 Так же работает любой другой список — счета и пользовательские справочники.
@@ -155,18 +170,18 @@ $leadsByPage = $amocrm->leads()->findPages('with=catalog_elements&order[id]=desc
 ```php
 $catalogs = $amocrm->catalogs();
 
-$all = $catalogs->findAll();
+$all = $catalogs->find(pages: null);
 $regular = $catalogs->findByType('regular'); // ещё бывают products, invoices, suppliers
 
 $elements = $catalogs->elements($catalogId);
-$elements->create(['name' => 'Строка справочника']);
+$elements->create([['name' => 'Строка справочника']]);
 $elements->linkToLead($leadId, $elementId);
 ```
 
 По элементам списков amoCRM ищет только по ID и полнотекстовым `query`. Фильтр
 по значению поля она не выполняет и не отклоняет — молча отдаёт весь список,
 поэтому `findByField()` у элементов бросает исключение, а не возвращает мусор.
-У самих списков поиска нет вовсе: нужный берут из `findAll()` или `findByType()`.
+У самих списков поиска нет вовсе: нужный берут из `find(pages: null)` или `findByType()`.
 
 Удаления товаров, элементов и сделок в API v4 нет — на `DELETE` amoCRM отвечает
 405, чистить приходится в интерфейсе.
@@ -176,37 +191,6 @@ $elements->linkToLead($leadId, $elementId);
 ```php
 $events = $amocrm->raw()->get('api/v4/events', 'filter[entity][0]=lead&limit=50');
 $amocrm->raw()->delete('api/v4/leads/notes/' . $noteId);
-```
-
-## Параллельные запросы
-
-Запросов передают сколько нужно — в полёте держится семь, это лимит amoCRM на
-аккаунт. Освободившееся место сразу занимает следующий запрос очереди, так что
-ждать всю семёрку ради восьмого не приходится.
-
-```php
-$raw = $amocrm->raw();
-
-// Один эндпоинт, разные параметры.
-$pages = $raw->getMany('api/v4/leads', ['page=1&limit=250', 'page=2&limit=250']);
-
-// Разные эндпоинты и любые методы: postMany, patchMany, putMany, deleteMany.
-$results = $raw->postMany([
-    10 => ['endpoint' => 'api/v4/leads/10/link', 'data' => [$link]],
-    20 => ['endpoint' => 'api/v4/leads/20/link', 'data' => [$link]],
-]);
-```
-
-Ошибка одного запроса не срывает остальные и не приходит исключением: под своим
-ключом вместо ответа лежит `ApiException`, поэтому видно, что записалось, а что
-нет.
-
-```php
-foreach ($results as $key => $result) {
-    if ($result instanceof ApiException) {
-        continue; // этот не прошёл, остальные прошли
-    }
-}
 ```
 
 ## Повторные попытки
@@ -230,9 +214,8 @@ foreach ($results as $key => $result) {
 и повтор завёл бы вторую копию. HTTP 429 — случай понятный: запрос отклонён
 целиком, записать ничего не успели, повторять безопасно.
 
-В пачке повтор идёт на уровне отдельного запроса: соседей он не задерживает и
-их ответы не отменяет. Когда дубли не страшны или запрос идемпотентен, запись
-переотправляют сами — из ответа `-Many` видно, что именно не прошло.
+Когда дубли не страшны или запрос идемпотентен, запись переотправляют сами —
+по `ApiException` видно, какой именно запрос не прошёл.
 
 ## Ошибки
 

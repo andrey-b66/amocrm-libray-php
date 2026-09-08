@@ -36,27 +36,30 @@ final class Task extends AbstractApiRepository
         $data['entity_type'] = EntityType::validate($entityType);
         $data['entity_id'] = $entityId;
 
-        return $this->create($data);
+        // Задача здесь всегда одна, поэтому из списка создаётся и возвращается
+        // одна: create() работает списками, как и сама amoCRM.
+        return $this->create([$data])[0] ?? [];
     }
 
     /**
      * Получить задачи конкретной сущности.
      *
      * Пример: findForEntity('leads', $leadId, 'filter[is_completed]=0')
+     * Пример: findForEntity('leads', $leadId, pages: null) — все задачи сущности
      */
     public function findForEntity(
         string $entityType,
         int $entityId,
         string $query = '',
-        int $page = 1,
         int $limit = self::MAX_PAGE_SIZE,
+        ?int $pages = 1,
     ): array {
         $entityType = EntityType::validate($entityType);
 
         return $this->find(
             $query . "&filter[entity_type]=$entityType&filter[entity_id]=$entityId",
-            $page,
             $limit,
+            $pages,
         );
     }
 }

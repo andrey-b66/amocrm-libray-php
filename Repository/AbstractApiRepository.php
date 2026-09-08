@@ -20,17 +20,6 @@ abstract class AbstractApiRepository
 {
     protected const MAX_PAGE_SIZE = 250;
 
-    /**
-     * Сколько ID помещается в один запрос выборки по списку ID.
-     *
-     * Порция маленькая не из-за длины адреса — восемь килобайт amoCRM принимает
-     * спокойно. Дело в ответе: строку запроса amoCRM повторяет в полях `_links`
-     * и `_embedded` каждой найденной сущности, поэтому фильтр из 250 ID
-     * возвращается 250 раз и ответ распухает вчетверо-впятеро. По замерам на
-     * 250 сделках: порция 250 — 12.6 КБ на сделку, порция 25 — 2.5 КБ, порция
-     * 10 — 1.9 КБ. Меньше 25 брать незачем: выигрыш в байтах уже не окупает
-     * лишние запросы, и по времени порция 25 выходит быстрее.
-     */
     protected const MAX_IDS_PER_REQUEST = 25;
 
     /** Сколько сущностей amoCRM принимает в теле одного запроса на запись. */
@@ -50,15 +39,83 @@ abstract class AbstractApiRepository
     }
 
     /**
-     * Создать одну сущность по данным формата amoCRM API v4.
+     * Создать сущности по данным формата amoCRM API v4.
      *
-     * Пример: create(['name' => 'Иван', 'custom_fields_values' => [...]])
+     * Принимает список сущностей и возвращает список созданных — даже когда
+     * сущность одна: create([['name' => 'Иван']]). Так же, как их принимает
+     * сама amoCRM, поэтому одну запись и тысячу создают одним и тем же кодом.
+     *
+     * Пачка идёт в теле одного запроса: amoCRM принимает до 250 штук за раз,
+     * поэтому список любой длины бьётся на порции по 250, и порции уходят одна
+     * за другой. Тысяча контактов — это четыре запроса вместо тысячи.
+     *
+     * На создание amoCRM отдаёт не всю сущность, а только `id`, `request_id` и
+     * ссылку на неё. Если нужна созданная запись целиком, её читают потом через
+     * findByIds().
+     *
+     * Порядок возврата задаёт amoCRM. Чтобы связать созданные записи со своими
+     * исходными, положите в каждую сущность поле `request_id` — любое своё
+     * значение, хоть ID записи в вашей базе. amoCRM его не разбирает, а
+     * возвращает обратно рядом с `id`. Без него amoCRM подставит своё значение,
+     * и в каждой порции нумерация начнётся заново.
+     *
+     * Ошибка приходит исключением, но запись при этом всё равно частичная:
+     * предыдущие порции уже создались, а следующие не отправятся вовсе.
+     *
+     * Пример: create([
+     *     [
+     *         'name' => 'Иван',
+     *         'request_id' => '42',
+     *         'custom_fields_values' => [
+     *             ['field_code' => 'PHONE', 'values' => [['value' => '+79990000000']]],
+     *         ],
+     *     ],
+     *     [
+     *         'name' => 'Пётр',
+     *         'request_id' => '43',
+     *         'custom_fields_values' => [
+     *             ['field_id' => 123456, 'values' => [['value' => 'ООО Ромашка']]],
+     *         ],
+     *     ],
+     * ])
+     *
+     * Ответ: [
+     *     ['id' => 40401635, 'request_id' => '42', '_links' => [...]],
+     *     ['id' => 40401636, 'request_id' => '43', '_links' => [...]],
+     * ]
      */
-    public function create(array $data): array
+    public function create(array $entities): array
     {
-        $response = $this->request->post($this->endpoint(), [$data]);
+        // Пустой список — создавать нечего.
+        if ($entities === []) {
+            return [];
+        }
 
-        return $response['_embedded'][$this->embeddedKey()][0] ?? [];
+        foreach ($entities as $index => $entity) {
+            // Одну сущность тоже передают списком: create([['name' => 'Иван']]).
+            if (!is_array($entity)) {
+                throw new InvalidArgumentException(
+                    'Элемент ' . $index . ' не является массивом данных сущности: '
+                    . 'create() принимает список сущностей.',
+                );
+            }
+        }
+
+        $created = [];
+
+        // array_chunk нумерует каждую порцию заново с нуля, и это важно: если
+        // во входном списке ключи шли с пропусками (например, после
+        // array_filter), json_encode превратил бы его в объект
+        // `{"0":…,"2":…}`, а amoCRM ждёт в теле запроса массив `[…]`.
+        foreach (array_chunk($entities, self::MAX_BATCH_SIZE) as $chunk) {
+            $response = $this->request->post($this->endpoint(), $chunk);
+
+            foreach ($response['_embedded'][$this->embeddedKey()] ?? [] as $entity) {
+                $created[] = $entity;
+            }
+        }
+
+        return $created;
     }
 
     /**
@@ -87,94 +144,81 @@ abstract class AbstractApiRepository
     }
 
     /**
-     * Получить одну страницу сущностей.
+     * Получить сущности по запросу — одну страницу, несколько или все.
      *
      * Запрос пишется обычной строкой, как в адресной строке браузера: можно
-     * вставить и целиком URL, всё до `?` отбросится. `page` и `limit` из
-     * строки игнорируются — их задают аргументы метода.
+     * вставить и целиком URL, всё до `?` отбросится. `page` и `limit` из строки
+     * игнорируются — их задают аргументы метода.
      *
-     * Пример: find('filter[pipeline_id][0]=10739150&filter[status_id][0]=143&with=contacts')
-     * Пример: find('https://my.amocrm.ru/leads?filter[created_at][from]=1753747200', 2, 50)
+     * Сколько читать, задаёт `$pages`: число — столько страниц, `null` — до
+     * конца выборки. Обход в любом случае останавливается, когда amoCRM
+     * перестаёт отдавать ссылку `_links.next`, поэтому лишних запросов не будет.
+     * Возвращается всегда список сущностей.
+     *
+     * Страницы читаются одна за другой, и весь результат держится в памяти: для
+     * очень больших выборок лучше сузить фильтр.
+     *
+     * Порядок выдачи между запросами amoCRM не закрепляет, поэтому при обходе
+     * нескольких страниц в запрос стоит добавить `order[id]=asc`: иначе сделка,
+     * изменившаяся во время обхода, может попасть в две страницы сразу или не
+     * попасть ни в одну.
+     *
+     * Пример: find('filter[status_id][0]=143&with=contacts') — первая страница
+     * Пример: find('https://my.amocrm.ru/leads?filter[created_at][from]=1753747200', 50)
+     * Пример: find('filter[status_id][0]=143&order[id]=asc', pages: 3) — три страницы
+     * Пример: find('filter[status_id][0]=143', pages: null) — вообще все сущности
+     *
+     * @param int|null $pages сколько страниц прочитать; null — все до конца выборки
      */
     public function find(
         string $query = '',
-        int $page = 1,
         int $limit = self::MAX_PAGE_SIZE,
+        ?int $pages = 1,
     ): array {
-        return $this->getEntitiesPage($this->buildListQuery($query, $page, $limit))[0];
-    }
-
-    /**
-     * Получить сразу несколько страниц — запросы к amoCRM уходят одновременно.
-     *
-     * Возвращает массив «номер страницы => список сущностей» в порядке
-     * переданных номеров. Пустой список означает, что страница вышла за край
-     * выборки: дальше данных нет. Страниц передают сколько нужно — в полёте
-     * держится семь, это лимит amoCRM, а освободившееся место сразу занимает
-     * следующая страница.
-     *
-     * Порядок выдачи между запросами amoCRM не закрепляет, поэтому для
-     * постраничной выгрузки в запрос стоит добавить `order[id]=asc`: иначе
-     * сделка, изменившаяся во время обхода, может попасть в две страницы сразу
-     * или не попасть ни в одну.
-     *
-     * Пример: findPages('filter[status_id][0]=143&order[id]=asc', [1, 2, 3])
-     *
-     * @param int[] $pages номера страниц, нумерация с единицы
-     * @return array<int, array>
-     */
-    public function findPages(
-        string $query,
-        array $pages,
-        int $limit = self::MAX_PAGE_SIZE,
-    ): array {
-        $queries = [];
-
-        foreach ($pages as $page) {
-            $page = (int) $page;
-            $queries[$page] = $this->buildListQuery($query, $page, $limit);
+        if ($pages !== null && $pages < 1) {
+            throw new InvalidArgumentException(
+                'Читать нужно хотя бы одну страницу, передано: ' . $pages . '.',
+            );
         }
 
-        $entitiesByPage = [];
-
-        foreach ($this->request->getMany($this->endpoint(), $queries) as $page => $response) {
-            // Пачка отдаёт ошибку значением, а репозиторий — исключением, как везде.
-            if ($response instanceof ApiException) {
-                throw $response;
-            }
-
-            $entitiesByPage[$page] = array_values($response['_embedded'][$this->embeddedKey()] ?? []);
-        }
-
-        return $entitiesByPage;
-    }
-
-    /**
-     * Получить все сущности по запросу, обходя страницы автоматически.
-     *
-     * Страницы читаются по 250 штук, пока amoCRM отдаёт ссылку `_links.next`.
-     * Весь результат держится в памяти: для очень больших выборок лучше сузить
-     * фильтр или читать постранично через find().
-     *
-     * Пример: findAll('filter[pipeline_id][0]=10739150&filter[status_id][0]=143')
-     * Пример: findAll() — вообще все сущности
-     */
-    public function findAll(string $query = ''): array
-    {
         $entities = [];
         $page = 1;
+        $pagesRead = 0;
 
-        do {
-            [$pageEntities, $hasNextPage] = $this->getEntitiesPage(
-                $this->buildListQuery($query, $page, self::MAX_PAGE_SIZE),
+        while (true) {
+            $response = $this->request->get(
+                $this->endpoint(),
+                $this->buildListQuery($query, $page, $limit),
             );
+
+            // Коллекция лежит внутри `_embedded` под ключом сущности: leads,
+            // contacts, elements. На пустую выборку amoCRM отвечает 204 без
+            // тела, поэтому `_embedded` в ответе может не оказаться вовсе.
+            $pageEntities = $response['_embedded'][$this->embeddedKey()] ?? [];
 
             foreach ($pageEntities as $entity) {
                 $entities[] = $entity;
             }
 
+            $pagesRead++;
+
+            // Страница пришла пустая — читать дальше нечего.
+            if ($pageEntities === []) {
+                break;
+            }
+
+            // Прочитали столько страниц, сколько просили.
+            if ($pages !== null && $pagesRead >= $pages) {
+                break;
+            }
+
+            // amoCRM перестала давать ссылку на следующую страницу.
+            if (!isset($response['_links']['next']['href'])) {
+                break;
+            }
+
             $page++;
-        } while ($hasNextPage);
+        }
 
         return $entities;
     }
@@ -182,8 +226,8 @@ abstract class AbstractApiRepository
     /**
      * Получить сущности по списку ID. Большие списки сами бьются на порции по 25 ID.
      *
-     * Порции уходят к amoCRM одновременно, поэтому список любой длины читается
-     * заметно быстрее, чем теми же запросами по очереди.
+     * Порции уходят к amoCRM одна за другой, поэтому чем длиннее список, тем
+     * дольше ответ.
      *
      * Результат идёт в порядке переданных ID. Дубли удаляются, отсутствующие
      * или недоступные сущности в результат не попадают.
@@ -199,9 +243,9 @@ abstract class AbstractApiRepository
             return [];
         }
 
-        $queries = [];
+        $entitiesById = [];
 
-        foreach (array_chunk($ids, self::MAX_IDS_PER_REQUEST) as $chunkNumber => $chunk) {
+        foreach (array_chunk($ids, self::MAX_IDS_PER_REQUEST) as $chunk) {
             $query = '';
 
             foreach ($chunk as $index => $id) {
@@ -214,16 +258,7 @@ abstract class AbstractApiRepository
                 $query .= '&with=' . $with;
             }
 
-            $queries[$chunkNumber] = $query;
-        }
-
-        $entitiesById = [];
-
-        foreach ($this->request->getMany($this->endpoint(), $queries) as $response) {
-            // Пачка отдаёт ошибку значением, а репозиторий — исключением, как везде.
-            if ($response instanceof ApiException) {
-                throw $response;
-            }
+            $response = $this->request->get($this->endpoint(), $query);
 
             foreach ($response['_embedded'][$this->embeddedKey()] ?? [] as $entity) {
                 $entityId = $entity['id'] ?? null;
@@ -246,48 +281,56 @@ abstract class AbstractApiRepository
     }
 
     /**
-     * Обновить одну сущность частичными данными формата amoCRM API v4.
+     * Обновить сущности частичными данными формата amoCRM API v4.
      *
-     * Пример: update(15, ['name' => 'Пётр'])
-     */
-    public function update(int $id, array $data): array
-    {
-        return $this->request->patch($this->endpoint() . '/' . $id, $data);
-    }
-
-    /**
-     * Обновить сразу несколько сущностей: у каждой свой `id` внутри данных.
+     * Принимает список сущностей и возвращает список обновлённых — даже когда
+     * сущность одна: update([['id' => 15, 'name' => 'Пётр']]). Так же, как их
+     * принимает сама amoCRM, поэтому одну запись и тысячу правят одним кодом.
      *
-     * Сущности идут пачкой в теле запроса, а не по одной: amoCRM принимает до
-     * 250 штук за раз, поэтому список любой длины бьётся на порции по 250, и
-     * порции уходят одновременно. Тысяча сделок — это четыре запроса вместо
-     * тысячи.
+     * У каждой сущности должен быть свой `id` внутри данных — по нему amoCRM и
+     * находит запись. Остальные поля частичные: перечисляют только то, что
+     * меняется, остальное остаётся как было.
+     *
+     * Пачка идёт в теле одного запроса: amoCRM принимает до 250 штук за раз,
+     * поэтому список любой длины бьётся на порции по 250, и порции уходят одна
+     * за другой. Тысяча сделок — это четыре запроса вместо тысячи.
      *
      * Возвращает обновлённые сущности в том виде, в каком их вернула amoCRM.
      * Порядок задаёт amoCRM, поэтому искать в результате нужную стоит по `id`.
      *
      * Ошибка приходит исключением, но запись при этом всё равно частичная:
-     * amoCRM применяет годные сущности и в той порции, которая ответила
-     * ошибкой, а соседние порции к этому моменту записались тем более — они
-     * уходят независимо. Поэтому исключение здесь означает «прошло не всё», а
-     * не «не прошло ничего». Непринятые записи перечислены у ApiException в
-     * getResponseData() под своими ID:
+     * предыдущие порции уже записались, в упавшей amoCRM применила годные
+     * сущности, а следующие порции не отправятся вовсе. Поэтому исключение
+     * здесь означает «прошло не всё», а не «не прошло ничего». Непринятые
+     * записи перечислены у ApiException в getResponseData() под своими ID:
      * `['errors' => [999999999 => 'Lead not found']]`.
      *
-     * Пример: updateMany([
+     * Пример: update([
      *     ['id' => 10, 'price' => 1000],
      *     ['id' => 20, 'name' => 'Пётр'],
      * ])
+     *
+     * Ответ: [
+     *     ['id' => 10, 'name' => 'Заявка с сайта', 'price' => 1000, ...],
+     *     ['id' => 20, 'name' => 'Пётр', ...],
+     * ]
      */
-    public function updateMany(array $entities): array
+    public function update(array $entities): array
     {
-        $entities = array_values($entities);
-
+        // Пустой список — обновлять нечего.
         if ($entities === []) {
             return [];
         }
 
         foreach ($entities as $index => $entity) {
+            // Одну сущность тоже передают списком: update([['id' => 15, ...]]).
+            if (!is_array($entity)) {
+                throw new InvalidArgumentException(
+                    'Элемент ' . $index . ' не является массивом данных сущности: '
+                    . 'update() принимает список сущностей.',
+                );
+            }
+
             // Без `id` amoCRM молча создала бы новую сущность вместо обновления.
             if (!isset($entity['id'])) {
                 throw new InvalidArgumentException(
@@ -296,19 +339,14 @@ abstract class AbstractApiRepository
             }
         }
 
-        $requests = [];
-
-        foreach (array_chunk($entities, self::MAX_BATCH_SIZE) as $chunkNumber => $chunk) {
-            $requests[$chunkNumber] = ['endpoint' => $this->endpoint(), 'data' => $chunk];
-        }
-
         $updated = [];
 
-        foreach ($this->request->patchMany($requests) as $response) {
-            // Пачка отдаёт ошибку значением, а репозиторий — исключением, как везде.
-            if ($response instanceof ApiException) {
-                throw $response;
-            }
+        // array_chunk нумерует каждую порцию заново с нуля, и это важно: если
+        // во входном списке ключи шли с пропусками (например, после
+        // array_filter), json_encode превратил бы его в объект
+        // `{"0":…,"2":…}`, а amoCRM ждёт в теле запроса массив `[…]`.
+        foreach (array_chunk($entities, self::MAX_BATCH_SIZE) as $chunk) {
+            $response = $this->request->patch($this->endpoint(), $chunk);
 
             foreach ($response['_embedded'][$this->embeddedKey()] ?? [] as $entity) {
                 $updated[] = $entity;
@@ -343,7 +381,7 @@ abstract class AbstractApiRepository
             $query .= '&with=' . $with;
         }
 
-        return $this->find($query, 1, $limit);
+        return $this->find($query, $limit);
     }
 
     /**
@@ -390,7 +428,7 @@ abstract class AbstractApiRepository
             $query .= '&with=' . $with;
         }
 
-        return $this->find($query, 1, $limit);
+        return $this->find($query, $limit);
     }
 
     /**
@@ -425,19 +463,5 @@ abstract class AbstractApiRepository
         $parts[] = "limit=$limit";
 
         return implode('&', $parts);
-    }
-
-    /**
-     * Получить одну страницу коллекции вместе с признаком наличия следующей.
-     *
-     * Возвращает массив из списка сущностей и признака `есть следующая страница`.
-     */
-    protected function getEntitiesPage(string $query): array
-    {
-        $response = $this->request->get($this->endpoint(), $query);
-        $entities = array_values($response['_embedded'][$this->embeddedKey()] ?? []);
-        $hasNextPage = $entities !== [] && isset($response['_links']['next']['href']);
-
-        return [$entities, $hasNextPage];
     }
 }

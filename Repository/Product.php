@@ -17,7 +17,7 @@ use Amocrm\Exception\ApiException;
  * их ID берут из `api/v4/catalogs/{catalog_id}/custom_fields`.
  *
  * Пример: $products = $amocrm->catalogs()->products();
- *         $product = $products->create(['name' => 'Стул']);
+ *         [$product] = $products->create([['name' => 'Стул']]);
  *         $products->linkToLead($leadId, $product['id'], 2);
  */
 final class Product extends CatalogElement
