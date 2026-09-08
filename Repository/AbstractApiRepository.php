@@ -370,7 +370,7 @@ abstract class AbstractApiRepository
         string $with = '',
     ): array {
         return $this->findBySearchString(
-            FormattedNumberPhone::getLastTenDigits(trim($phone)),
+            FormattedNumberPhone::getLastDigits(trim($phone)),
             $limit,
             $with,
         );

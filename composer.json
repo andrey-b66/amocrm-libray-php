@@ -10,5 +10,25 @@
         "psr-4": {
             "Amocrm\\": ""
         }
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^10.5",
+        "friendsofphp/php-cs-fixer": "^3.64"
+    },
+    "config": {
+        "platform": {
+            "php": "8.1.0"
+        }
+    },
+    "scripts": {
+        "cs-check": [
+            "Composer\\Config::disableProcessTimeout",
+            "php-cs-fixer fix --dry-run --diff --rules=@PSR12 --using-cache=no ."
+        ],
+        "cs-fix": [
+            "Composer\\Config::disableProcessTimeout",
+            "php-cs-fixer fix --rules=@PSR12 --using-cache=no ."
+        ],
+        "test": "phpunit"
     }
 }
