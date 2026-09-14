@@ -1,13 +1,12 @@
 # Модуль amoCRM
 
-Работа с amoCRM API v4 через долгосрочный токен. HTTP на Guzzle: повторы при
-временных ошибках достаются оттуда и настройки не требуют. Запросы уходят по
-одному. Репозитории принимают и возвращают массивы формата API v4,
-подробности и примеры — в докблоках самих методов.
+Работа с amoCRM API v4 через долгосрочный токен. Репозитории принимают и
+возвращают массивы формата API v4, подробности и примеры — в докблоках самих
+методов.
 
 ## Установка
 
-PHP 8.1+ с расширениями `curl` и `json`.
+PHP 7.4 или 8.x с расширениями `json` и `openssl`.
 
 ```bash
 composer require integrat/amocrm
@@ -21,8 +20,6 @@ use Amocrm\Facade\Amocrm;
 $amocrm = new Amocrm('example.amocrm.ru', $longLivedToken);
 ```
 
-Для переноса в другой проект: `"autoload": { "psr-4": { "Amocrm\\": "путь/до/Amocrm/" } }`.
-
 ## Поиск
 
 Запрос пишется обычной строкой — той же, что в адресной строке браузера. Можно
@@ -32,12 +29,12 @@ $amocrm = new Amocrm('example.amocrm.ru', $longLivedToken);
 // Одна страница: limit задаётся аргументом, а не строкой.
 $leads = $amocrm->leads()->find('filter[pipeline_id][0]=10739150&filter[status_id][0]=143', 50);
 
-// Все страницы по 250 обходятся сами: pages: null — читать до конца выборки.
-$leads = $amocrm->leads()->find('filter[created_at][from]=1753747200&with=contacts', pages: null);
+// Все страницы по 250 обходятся сами: третий аргумент null — читать до конца выборки.
+$leads = $amocrm->leads()->find('filter[created_at][from]=1753747200&with=contacts', 250, null);
 
 // Ограниченный обход: три страницы подряд, дальше не идём. Результат — один
 // плоский список сделок, а не разбитый по страницам.
-$leads = $amocrm->leads()->find('filter[status_id][0]=143&order[id]=asc', pages: 3);
+$leads = $amocrm->leads()->find('filter[status_id][0]=143&order[id]=asc', 250, 3);
 
 $contact = $amocrm->contacts()->findById($contactId, 'leads,companies');
 $contacts = $amocrm->contacts()->findByIds([10, 20, 30]);
@@ -46,7 +43,7 @@ $contacts = $amocrm->contacts()->findByQuery('Ромашка');
 $contacts = $amocrm->contacts()->findByField(123456, 'ООО Ромашка');
 
 $leads = $amocrm->leads()->findActiveByContactId($contactId);
-$pipelines = $amocrm->pipelines()->find(pages: null);
+$pipelines = $amocrm->pipelines()->find('', 250, null);
 $users = $amocrm->users()->getActive();
 ```
 
@@ -125,7 +122,7 @@ $products->update([['id' => $product['id'], 'name' => 'Стул офисный']
 
 $products->findByQuery('Стул');
 $products->findById($product['id']);
-$products->find(pages: null);
+$products->find('', 250, null);
 
 // ID полей товара — цены, артикула, остатка.
 $fields = $amocrm->raw()->get('api/v4/catalogs/' . $products->catalogId() . '/custom_fields');
@@ -144,25 +141,15 @@ $leadProducts = $products->findForLead($leadId);   // сами товары
 $links = $products->findLinksForLead($leadId);     // связи, количество в metadata
 ```
 
-Количество бывает дробным — 2.5 килограмма amoCRM примет. Обратно оно приходит
-дробным всегда: в `metadata` лежит `quantity` = 2.0, а не 2.
-
-Цену сделки amoCRM пересчитывает не сразу: сразу после привязки она ещё старая,
-актуальная приходит примерно через секунду.
-
-Товары читаются тем же `find()`, что и остальные сущности: `pages` задаёт, где
-остановиться.
-
-```php
-$products->find('order[id]=asc', pages: 3);
-```
+Количество может быть дробным. Цену сделки amoCRM пересчитывает не сразу, а
+примерно через секунду после привязки.
 
 Товары сразу многих сделок берут не запросом на каждую сделку, а через
 `with=catalog_elements`: ID товаров и `metadata` с количеством придут прямо в
 сделках, в `_embedded.catalog_elements`.
 
 ```php
-$leads = $amocrm->leads()->find('with=catalog_elements&order[id]=desc', 50, pages: 4);
+$leads = $amocrm->leads()->find('with=catalog_elements&order[id]=desc', 50, 4);
 ```
 
 Так же работает любой другой список — счета и пользовательские справочники.
@@ -170,7 +157,7 @@ $leads = $amocrm->leads()->find('with=catalog_elements&order[id]=desc', 50, page
 ```php
 $catalogs = $amocrm->catalogs();
 
-$all = $catalogs->find(pages: null);
+$all = $catalogs->find('', 250, null);
 $regular = $catalogs->findByType('regular'); // ещё бывают products, invoices, suppliers
 
 $elements = $catalogs->elements($catalogId);
@@ -178,10 +165,8 @@ $elements->create([['name' => 'Строка справочника']]);
 $elements->linkToLead($leadId, $elementId);
 ```
 
-По элементам списков amoCRM ищет только по ID и полнотекстовым `query`. Фильтр
-по значению поля она не выполняет и не отклоняет — молча отдаёт весь список,
-поэтому `findByField()` у элементов бросает исключение, а не возвращает мусор.
-У самих списков поиска нет вовсе: нужный берут из `find(pages: null)` или `findByType()`.
+Поиска по значению поля у элементов списков нет: `findByField()` бросает
+исключение, вместо него используйте `findByQuery()`.
 
 Удаления товаров, элементов и сделок в API v4 нет — на `DELETE` amoCRM отвечает
 405, чистить приходится в интерфейсе.
@@ -190,32 +175,23 @@ $elements->linkToLead($leadId, $elementId);
 
 ```php
 $events = $amocrm->raw()->get('api/v4/events', 'filter[entity][0]=lead&limit=50');
-$amocrm->raw()->delete('api/v4/leads/notes/' . $noteId);
+$amocrm->raw()->patch('api/v4/leads/' . $leadId, ['price' => 1000]);
 ```
 
 ## Повторные попытки
 
-Запрос, упавший по временной причине, повторяется сам — до шести раз, с паузой,
-которая удваивается: 1, 2, 4, 8, 16, 32 секунды. Настраивать нечего и включать
-тоже: превышенный лимит запросов amoCRM держит не мгновение, и ждать её всё
-равно приходится.
+Запрос, упавший по временной причине, повторяется сам — до шести раз, с паузами
+1, 2, 4, 8, 16, 32 секунды.
 
-Что считается временным, зависит от метода:
-
-| Ошибка | GET | POST, PATCH, PUT, DELETE |
+| Ошибка | GET | POST, PATCH, PUT |
 |---|---|---|
 | HTTP 429, превышен лимит | повторяется | повторяется |
 | Обрыв связи, таймаут | повторяется | нет |
 | HTTP 5xx | повторяется | нет |
 | HTTP 400, 401, 403, 404 | нет | нет |
 
-Запись после обрыва связи не повторяется потому, что по такой ошибке не видно,
-дошла она или нет: ответ мог потеряться уже после того, как amoCRM всё создала,
-и повтор завёл бы вторую копию. HTTP 429 — случай понятный: запрос отклонён
-целиком, записать ничего не успели, повторять безопасно.
-
-Когда дубли не страшны или запрос идемпотентен, запись переотправляют сами —
-по `ApiException` видно, какой именно запрос не прошёл.
+Запись после обрыва связи или 5xx не повторяется, чтобы не завести дубль: ответ
+мог потеряться уже после того, как amoCRM всё создала.
 
 ## Ошибки
 

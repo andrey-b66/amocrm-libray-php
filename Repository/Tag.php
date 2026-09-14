@@ -32,7 +32,7 @@ final class Tag
         string $entityType,
         string $query = '',
         int $page = 1,
-        int $limit = self::MAX_PAGE_SIZE,
+        int $limit = self::MAX_PAGE_SIZE
     ): array {
         $entityType = EntityType::validate($entityType);
 
@@ -95,15 +95,21 @@ final class Tag
         string $entityType,
         int $entityId,
         string $operation,
-        array $tags,
+        array $tags
     ): array {
         $entityType = EntityType::validate($entityType);
 
         $tags = array_map(
-            static fn (mixed $tag): array => match (true) {
-                is_array($tag) => $tag,
-                is_int($tag) => ['id' => $tag],
-                default => ['name' => (string) $tag],
+            static function ($tag): array {
+                if (is_array($tag)) {
+                    return $tag;
+                }
+
+                if (is_int($tag)) {
+                    return ['id' => $tag];
+                }
+
+                return ['name' => (string) $tag];
             },
             $tags,
         );

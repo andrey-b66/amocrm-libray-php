@@ -45,14 +45,14 @@ final class Task extends AbstractApiRepository
      * Получить задачи конкретной сущности.
      *
      * Пример: findForEntity('leads', $leadId, 'filter[is_completed]=0')
-     * Пример: findForEntity('leads', $leadId, pages: null) — все задачи сущности
+     * Пример: findForEntity('leads', $leadId, '', 250, null) — все задачи сущности
      */
     public function findForEntity(
         string $entityType,
         int $entityId,
         string $query = '',
         int $limit = self::MAX_PAGE_SIZE,
-        ?int $pages = 1,
+        ?int $pages = 1
     ): array {
         $entityType = EntityType::validate($entityType);
 

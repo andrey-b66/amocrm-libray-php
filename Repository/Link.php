@@ -6,6 +6,7 @@ namespace Amocrm\Repository;
 
 use Amocrm\Client\ApiClient;
 use Amocrm\Support\EntityType;
+use LogicException;
 
 /**
  * Репозиторий связей между контактами, сделками и компаниями.
@@ -38,7 +39,7 @@ final class Link
         int $sourceId,
         string $targetType,
         int $targetId,
-        array $metadata = [],
+        array $metadata = []
     ): array {
         $sourceType = EntityType::validate($sourceType);
 
@@ -56,7 +57,7 @@ final class Link
         int $sourceId,
         string $targetType,
         int $targetId,
-        array $metadata = [],
+        array $metadata = []
     ): bool {
         $sourceType = EntityType::validate($sourceType);
 
@@ -78,7 +79,7 @@ final class Link
         string $entityType,
         int $entityId,
         ?string $targetType = null,
-        ?int $targetId = null,
+        ?int $targetId = null
     ): array {
         $entityType = EntityType::validate($entityType);
         $query = '';
@@ -105,7 +106,7 @@ final class Link
         string $sourceType,
         int $sourceId,
         string $targetType,
-        string $with = '',
+        string $with = ''
     ): array {
         $targetType = EntityType::validate($targetType);
         $targetIds = [];
@@ -222,10 +223,15 @@ final class Link
     /** Сущности грузит их собственный репозиторий — он уже умеет и пачки, и `with`. */
     private function repository(string $entityType): AbstractApiRepository
     {
-        return match (EntityType::validate($entityType)) {
-            EntityType::CONTACT => new Contact($this->request),
-            EntityType::LEAD => new Lead($this->request),
-            EntityType::COMPANY => new Company($this->request),
-        };
+        switch (EntityType::validate($entityType)) {
+            case EntityType::CONTACT:
+                return new Contact($this->request);
+            case EntityType::LEAD:
+                return new Lead($this->request);
+            case EntityType::COMPANY:
+                return new Company($this->request);
+            default:
+                throw new LogicException('Нет репозитория для типа сущности `' . $entityType . '`.');
+        }
     }
 }

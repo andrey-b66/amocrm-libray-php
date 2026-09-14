@@ -13,13 +13,13 @@
         </testsuite>
     </testsuites>
 
-    <source>
+    <coverage>
         <include>
-            <directory>Client</directory>
-            <directory>Exception</directory>
-            <directory>Facade</directory>
-            <directory>Repository</directory>
-            <directory>Support</directory>
+            <directory suffix=".php">Client</directory>
+            <directory suffix=".php">Exception</directory>
+            <directory suffix=".php">Facade</directory>
+            <directory suffix=".php">Repository</directory>
+            <directory suffix=".php">Support</directory>
         </include>
-    </source>
+    </coverage>
 </phpunit>

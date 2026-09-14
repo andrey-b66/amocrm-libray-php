@@ -25,7 +25,7 @@ final class Lead extends AbstractApiRepository
     /** Получить все активные сделки контакта. */
     public function findActiveByContactId(
         int $contactId,
-        array $excludedStatusIds = self::DEFAULT_CLOSED_STATUS_IDS,
+        array $excludedStatusIds = self::DEFAULT_CLOSED_STATUS_IDS
     ): array {
         return $this->findActiveByRelatedEntity(EntityType::CONTACT, $contactId, $excludedStatusIds);
     }
@@ -33,7 +33,7 @@ final class Lead extends AbstractApiRepository
     /** Найти все активные сделки, связанные с компанией. */
     public function findActiveByCompanyId(
         int $companyId,
-        array $excludedStatusIds = self::DEFAULT_CLOSED_STATUS_IDS,
+        array $excludedStatusIds = self::DEFAULT_CLOSED_STATUS_IDS
     ): array {
         return $this->findActiveByRelatedEntity(EntityType::COMPANY, $companyId, $excludedStatusIds);
     }
@@ -41,7 +41,7 @@ final class Lead extends AbstractApiRepository
     private function findActiveByRelatedEntity(
         string $entityType,
         int $entityId,
-        array $excludedStatusIds,
+        array $excludedStatusIds
     ): array {
         $entityType = EntityType::validate($entityType);
 

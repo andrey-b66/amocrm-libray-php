@@ -63,8 +63,8 @@ class CatalogElement extends AbstractApiRepository
     public function linkToLead(
         int $leadId,
         int $elementId,
-        int|float $quantity = 1,
-        ?int $priceId = null,
+        float $quantity = 1,
+        ?int $priceId = null
     ): array {
         $metadata = [
             'catalog_id' => $this->catalogId(),
@@ -156,12 +156,14 @@ class CatalogElement extends AbstractApiRepository
      * отклоняет: она молча отдаёт весь список — даже на значение, которого в
      * списке заведомо нет. Тихо вернуть не те данные хуже, чем сказать об этом,
      * поэтому метод и не работает. Ближайшая замена — findByQuery().
+     *
+     * @param int|float|string|bool $fieldValue
      */
     public function findByField(
         int $fieldId,
-        int|float|string|bool $fieldValue,
+        $fieldValue,
         int $limit = self::MAX_PAGE_SIZE,
-        string $with = '',
+        string $with = ''
     ): array {
         throw new BadMethodCallException(
             'amoCRM не фильтрует элементы списков по значению поля: фильтр игнорируется, '

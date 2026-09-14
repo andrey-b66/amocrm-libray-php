@@ -12,12 +12,12 @@ namespace Amocrm\Repository;
  * репозиториях: elements($catalogId) для любого списка, products() для товаров.
  *
  * Поиска и фильтров по спискам в amoCRM нет, есть только постраничная выдача,
- * поэтому нужный список ищут в полной выдаче find(pages: null): create(),
+ * поэтому нужный список ищут в полной выдаче find('', 250, null): create(),
  * update(), findById() и find() работают, поисковые методы — нет.
  *
- * Пример: $catalogs = $amocrm->catalogs()->find(pages: null);
- *         $products = $amocrm->catalogs()->products()->find(pages: null);
- *         $elements = $amocrm->catalogs()->elements($catalogId)->find(pages: null);
+ * Пример: $catalogs = $amocrm->catalogs()->find('', 250, null);
+ *         $products = $amocrm->catalogs()->products()->find('', 250, null);
+ *         $elements = $amocrm->catalogs()->elements($catalogId)->find('', 250, null);
  */
 final class Catalog extends AbstractApiRepository
 {
@@ -67,7 +67,7 @@ final class Catalog extends AbstractApiRepository
     public function findByType(string $type): array
     {
         return array_values(array_filter(
-            $this->find(pages: null),
+            $this->find('', self::MAX_PAGE_SIZE, null),
             static fn (array $catalog): bool => ($catalog['type'] ?? null) === $type,
         ));
     }
@@ -100,7 +100,7 @@ final class Catalog extends AbstractApiRepository
 
         $catalogsById = [];
 
-        foreach ($this->find(pages: null) as $catalog) {
+        foreach ($this->find('', self::MAX_PAGE_SIZE, null) as $catalog) {
             $catalogId = $catalog['id'] ?? null;
 
             if (is_int($catalogId)) {

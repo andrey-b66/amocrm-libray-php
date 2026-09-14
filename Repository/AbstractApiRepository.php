@@ -165,15 +165,15 @@ abstract class AbstractApiRepository
      *
      * Пример: find('filter[status_id][0]=143&with=contacts') — первая страница
      * Пример: find('https://my.amocrm.ru/leads?filter[created_at][from]=1753747200', 50)
-     * Пример: find('filter[status_id][0]=143&order[id]=asc', pages: 3) — три страницы
-     * Пример: find('filter[status_id][0]=143', pages: null) — вообще все сущности
+     * Пример: find('filter[status_id][0]=143&order[id]=asc', 250, 3) — три страницы
+     * Пример: find('filter[status_id][0]=143', 250, null) — вообще все сущности
      *
      * @param int|null $pages сколько страниц прочитать; null — все до конца выборки
      */
     public function find(
         string $query = '',
         int $limit = self::MAX_PAGE_SIZE,
-        ?int $pages = 1,
+        ?int $pages = 1
     ): array {
         if ($pages !== null && $pages < 1) {
             throw new InvalidArgumentException(
@@ -363,13 +363,21 @@ abstract class AbstractApiRepository
      * пользовательских полей.
      *
      * Пример: findByField(123456, 'ООО Ромашка')
+     *
+     * @param int|float|string|bool $fieldValue
      */
     public function findByField(
         int $fieldId,
-        int|float|string|bool $fieldValue,
+        $fieldValue,
         int $limit = self::MAX_PAGE_SIZE,
-        string $with = '',
+        string $with = ''
     ): array {
+        if (!is_scalar($fieldValue)) {
+            throw new InvalidArgumentException(
+                'Значение поля должно быть числом, строкой или логическим значением.',
+            );
+        }
+
         if (is_bool($fieldValue)) {
             $fieldValue = $fieldValue ? '1' : '0';
         }
@@ -392,7 +400,7 @@ abstract class AbstractApiRepository
     public function findByQuery(
         string $query,
         int $limit = self::MAX_PAGE_SIZE,
-        string $with = '',
+        string $with = ''
     ): array {
         return $this->findBySearchString(trim($query), $limit, $with);
     }
@@ -405,7 +413,7 @@ abstract class AbstractApiRepository
     public function findByPhone(
         string $phone,
         int $limit = self::MAX_PAGE_SIZE,
-        string $with = '',
+        string $with = ''
     ): array {
         return $this->findBySearchString(
             FormattedNumberPhone::getLastDigits(trim($phone)),
@@ -444,7 +452,9 @@ abstract class AbstractApiRepository
         $questionMarkPosition = strpos($query, '?');
 
         if ($questionMarkPosition !== false) {
-            $query = substr($query, $questionMarkPosition + 1);
+            // В PHP 7.4 substr() от позиции за концом строки отдаёт false, а не
+            // пустую строку: так бывает, когда `?` стоит последним символом.
+            $query = (string) substr($query, $questionMarkPosition + 1);
         }
 
         $parts = [];
@@ -452,7 +462,7 @@ abstract class AbstractApiRepository
         foreach (explode('&', $query) as $part) {
             $part = trim($part);
 
-            if ($part === '' || str_starts_with($part, 'page=') || str_starts_with($part, 'limit=')) {
+            if ($part === '' || strpos($part, 'page=') === 0 || strpos($part, 'limit=') === 0) {
                 continue;
             }
 

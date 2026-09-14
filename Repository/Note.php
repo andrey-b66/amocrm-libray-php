@@ -65,7 +65,7 @@ final class Note
         int $entityId,
         string $query = '',
         int $page = 1,
-        int $limit = self::MAX_PAGE_SIZE,
+        int $limit = self::MAX_PAGE_SIZE
     ): array {
         $entityType = EntityType::validate($entityType);
 
@@ -100,7 +100,7 @@ final class Note
         string $entityType,
         int $entityId,
         int $noteId,
-        array $data,
+        array $data
     ): array {
         $entityType = EntityType::validate($entityType);
 

@@ -25,7 +25,7 @@ use Amocrm\Repository\User;
  * принимают и возвращают обычные массивы формата amoCRM API v4.
  *
  * Пример: $amocrm = new Amocrm('example.amocrm.ru', $longLivedToken);
- *         $leads = $amocrm->leads()->find('filter[status_id][0]=143', pages: null);
+ *         $leads = $amocrm->leads()->find('filter[status_id][0]=143', 250, null);
  */
 final class Amocrm
 {
@@ -109,7 +109,7 @@ final class Amocrm
         return $this->catalogs ??= new Catalog($this->apiClient);
     }
 
-    /** Получить низкоуровневый доступ к amoCRM API v4: get/post/patch/put/delete. */
+    /** Получить низкоуровневый доступ к amoCRM API v4: get/post/patch/put. */
     public function raw(): ApiClient
     {
         return $this->apiClient;

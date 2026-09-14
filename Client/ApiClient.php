@@ -32,7 +32,7 @@ use Psr\Http\Message\ResponseInterface;
  * Запросы уходят по одному, в том порядке, в каком их сделал вызывающий код.
  *
  * Пример: $amocrm->raw()->get('api/v4/events', 'filter[entity][0]=lead&limit=50')
- * Пример: $amocrm->raw()->delete('api/v4/leads/notes/' . $noteId)
+ * Пример: $amocrm->raw()->patch('api/v4/leads/' . $leadId, ['price' => 1000])
  */
 final class ApiClient
 {
@@ -137,7 +137,7 @@ final class ApiClient
             static function (
                 int $retries,
                 RequestInterface $request,
-                ?ResponseInterface $response = null,
+                ?ResponseInterface $response = null
             ): bool {
                 if ($retries >= self::RETRY_ATTEMPTS) {
                     return false;
@@ -222,16 +222,27 @@ final class ApiClient
 
     private function errorMessage(int $statusCode, array $responseData): string
     {
-        $message = match ($statusCode) {
-            400 => 'amoCRM отклонила данные запроса.',
-            401 => 'Долгосрочный токен amoCRM недействителен или отозван.',
-            403 => 'Недостаточно прав для выполнения запроса к amoCRM.',
-            404 => 'Запрошенный ресурс amoCRM не найден.',
-            429 => 'Превышен лимит запросов к amoCRM.',
-            default => $statusCode >= 500
-                ? 'Сервис amoCRM временно недоступен.'
-                : "amoCRM вернула HTTP-ошибку $statusCode.",
-        };
+        switch ($statusCode) {
+            case 400:
+                $message = 'amoCRM отклонила данные запроса.';
+                break;
+            case 401:
+                $message = 'Долгосрочный токен amoCRM недействителен или отозван.';
+                break;
+            case 403:
+                $message = 'Недостаточно прав для выполнения запроса к amoCRM.';
+                break;
+            case 404:
+                $message = 'Запрошенный ресурс amoCRM не найден.';
+                break;
+            case 429:
+                $message = 'Превышен лимит запросов к amoCRM.';
+                break;
+            default:
+                $message = $statusCode >= 500
+                    ? 'Сервис amoCRM временно недоступен.'
+                    : "amoCRM вернула HTTP-ошибку $statusCode.";
+        }
 
         $detail = $responseData['detail'] ?? null;
 

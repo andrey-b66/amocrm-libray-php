@@ -9,14 +9,24 @@ use RuntimeException;
 /** Ошибка выполнения запроса к amoCRM API. */
 class ApiException extends RuntimeException
 {
+    private int $statusCode;
+    private string $httpMethod;
+    private string $endpoint;
+    private array $responseData;
+
     public function __construct(
         string $message,
-        private readonly int $statusCode,
-        private readonly string $httpMethod,
-        private readonly string $endpoint,
-        private readonly array $responseData = [],
+        int $statusCode,
+        string $httpMethod,
+        string $endpoint,
+        array $responseData = []
     ) {
         parent::__construct($message, $statusCode);
+
+        $this->statusCode = $statusCode;
+        $this->httpMethod = $httpMethod;
+        $this->endpoint = $endpoint;
+        $this->responseData = $responseData;
     }
 
     public function getStatusCode(): int
