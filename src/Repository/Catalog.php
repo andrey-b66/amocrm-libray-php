@@ -66,10 +66,15 @@ final class Catalog extends AbstractApiRepository
      */
     public function findByType(string $type): array
     {
-        return array_values(array_filter(
-            $this->find('', self::MAX_PAGE_SIZE, null),
-            static fn (array $catalog): bool => ($catalog['type'] ?? null) === $type,
-        ));
+        $catalogs = [];
+
+        foreach ($this->find('', self::MAX_PAGE_SIZE, null) as $catalog) {
+            if (($catalog['type'] ?? null) === $type) {
+                $catalogs[] = $catalog;
+            }
+        }
+
+        return $catalogs;
     }
 
     /**
@@ -92,7 +97,7 @@ final class Catalog extends AbstractApiRepository
      */
     public function findByIds(array $ids, string $with = ''): array
     {
-        $ids = array_values(array_unique($ids));
+        $ids = array_unique($ids);
 
         if ($ids === []) {
             return [];

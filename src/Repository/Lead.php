@@ -61,15 +61,20 @@ final class Lead extends AbstractApiRepository
             $leadId = $linkedLead['id'] ?? null;
 
             if (is_int($leadId)) {
-                $leadIds[$leadId] = $leadId;
+                $leadIds[] = $leadId;
             }
         }
 
+        $activeLeads = [];
+
         // amoCRM умеет фильтровать только по включённым статусам, поэтому
         // закрытые сделки отсеиваем уже здесь.
-        return array_values(array_filter(
-            $this->findByIds(array_values($leadIds)),
-            static fn (array $lead): bool => !in_array($lead['status_id'] ?? null, $excludedStatusIds, true),
-        ));
+        foreach ($this->findByIds($leadIds) as $lead) {
+            if (!in_array($lead['status_id'] ?? null, $excludedStatusIds, true)) {
+                $activeLeads[] = $lead;
+            }
+        }
+
+        return $activeLeads;
     }
 }

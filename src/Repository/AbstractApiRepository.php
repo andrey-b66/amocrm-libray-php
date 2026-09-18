@@ -6,7 +6,6 @@ namespace Amocrm\Repository;
 
 use Amocrm\Client\ApiClient;
 use Amocrm\Exception\ApiException;
-use Amocrm\Support\FormattedNumberPhone;
 use InvalidArgumentException;
 
 /**
@@ -24,6 +23,9 @@ abstract class AbstractApiRepository
 
     /** Сколько сущностей amoCRM принимает в теле одного запроса на запись. */
     protected const MAX_BATCH_SIZE = 250;
+
+    /** Сколько последних цифр номера amoCRM использует при поиске по телефону. */
+    private const PHONE_SEARCH_DIGITS = 10;
 
     protected ApiClient $request;
 
@@ -104,9 +106,9 @@ abstract class AbstractApiRepository
         $created = [];
 
         // array_chunk нумерует каждую порцию заново с нуля, и это важно: если
-        // во входном списке ключи шли с пропусками (например, после
-        // array_filter), json_encode превратил бы его в объект
-        // `{"0":…,"2":…}`, а amoCRM ждёт в теле запроса массив `[…]`.
+        // во входном списке ключи шли с пропусками (например, после unset),
+        // json_encode превратил бы его в объект `{"0":…,"2":…}`, а amoCRM
+        // ждёт в теле запроса массив `[…]`.
         foreach (array_chunk($entities, self::MAX_BATCH_SIZE) as $chunk) {
             $response = $this->request->post($this->endpoint(), $chunk);
 
@@ -236,7 +238,7 @@ abstract class AbstractApiRepository
      */
     public function findByIds(array $ids, string $with = ''): array
     {
-        $ids = array_values(array_unique($ids));
+        $ids = array_unique($ids);
         $with = trim($with);
 
         if ($ids === []) {
@@ -342,9 +344,9 @@ abstract class AbstractApiRepository
         $updated = [];
 
         // array_chunk нумерует каждую порцию заново с нуля, и это важно: если
-        // во входном списке ключи шли с пропусками (например, после
-        // array_filter), json_encode превратил бы его в объект
-        // `{"0":…,"2":…}`, а amoCRM ждёт в теле запроса массив `[…]`.
+        // во входном списке ключи шли с пропусками (например, после unset),
+        // json_encode превратил бы его в объект `{"0":…,"2":…}`, а amoCRM
+        // ждёт в теле запроса массив `[…]`.
         foreach (array_chunk($entities, self::MAX_BATCH_SIZE) as $chunk) {
             $response = $this->request->patch($this->endpoint(), $chunk);
 
@@ -415,8 +417,14 @@ abstract class AbstractApiRepository
         int $limit = self::MAX_PAGE_SIZE,
         string $with = ''
     ): array {
+        // amoCRM ищет по подстроке цифр, поэтому номер к формату не приводится:
+        // остаются только цифры, из них — последние десять. Так одинаково
+        // ищутся '+7 (999) 000-00-00' и '8 999 000 00 00'. Цифр меньше десяти —
+        // берутся все; нет совсем — поиск пустой, и контакты не ищутся.
+        $digits = preg_replace('/\D+/', '', $phone) ?? '';
+
         return $this->findBySearchString(
-            FormattedNumberPhone::getLastDigits(trim($phone)),
+            substr($digits, -self::PHONE_SEARCH_DIGITS),
             $limit,
             $with,
         );

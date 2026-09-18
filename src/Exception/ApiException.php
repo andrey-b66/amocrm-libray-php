@@ -53,6 +53,6 @@ class ApiException extends RuntimeException
     {
         $errors = $this->responseData['validation-errors'] ?? [];
 
-        return is_array($errors) ? array_values($errors) : [];
+        return is_array($errors) ? $errors : [];
     }
 }

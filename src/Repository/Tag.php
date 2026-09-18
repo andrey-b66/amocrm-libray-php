@@ -41,7 +41,7 @@ final class Tag
 
         $response = $this->request->get("api/v4/$entityType/tags", $query);
 
-        return array_values($response['_embedded']['tags'] ?? []);
+        return $response['_embedded']['tags'] ?? [];
     }
 
     /**

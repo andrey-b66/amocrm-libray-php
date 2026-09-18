@@ -1,0 +1,6 @@
+# В пакет, который ставит composer, попадает только код библиотеки.
+/tests                  export-ignore
+/.gitattributes         export-ignore
+/.gitignore             export-ignore
+/.php-cs-fixer.dist.php export-ignore
+/phpunit.xml.dist       export-ignore

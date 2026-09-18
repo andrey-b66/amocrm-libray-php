@@ -94,7 +94,7 @@ final class Link
 
         $response = $this->request->get("api/v4/$entityType/$entityId/links", $query);
 
-        return array_values($response['_embedded']['links'] ?? []);
+        return $response['_embedded']['links'] ?? [];
     }
 
     /**
@@ -115,11 +115,11 @@ final class Link
             $targetId = $link['to_entity_id'] ?? null;
 
             if (is_int($targetId) && ($link['to_entity_type'] ?? null) === $targetType) {
-                $targetIds[$targetId] = $targetId;
+                $targetIds[] = $targetId;
             }
         }
 
-        return $this->repository($targetType)->findByIds(array_values($targetIds), $with);
+        return $this->repository($targetType)->findByIds($targetIds, $with);
     }
 
     public function findLeadsForContact(int $contactId, string $with = ''): array

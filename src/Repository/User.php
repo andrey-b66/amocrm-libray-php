@@ -28,7 +28,7 @@ final class User
 
         do {
             $response = $this->request->get(self::ENDPOINT, "page=$page&limit=" . self::PAGE_SIZE);
-            $pageUsers = array_values($response['_embedded']['users'] ?? []);
+            $pageUsers = $response['_embedded']['users'] ?? [];
 
             foreach ($pageUsers as $user) {
                 $users[] = $user;
@@ -69,9 +69,14 @@ final class User
 
     private function filterByActivity(bool $isActive): array
     {
-        return array_values(array_filter(
-            $this->getAll(),
-            static fn (array $user): bool => ($user['rights']['is_active'] ?? null) === $isActive,
-        ));
+        $users = [];
+
+        foreach ($this->getAll() as $user) {
+            if (($user['rights']['is_active'] ?? null) === $isActive) {
+                $users[] = $user;
+            }
+        }
+
+        return $users;
     }
 }

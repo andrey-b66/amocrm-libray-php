@@ -5,29 +5,18 @@ declare(strict_types=1);
 namespace Amocrm\Client;
 
 use Amocrm\Exception\ApiException;
-use GuzzleHttp\Client;
-use GuzzleHttp\Exception\GuzzleException;
-use GuzzleHttp\HandlerStack;
-use GuzzleHttp\Middleware;
-use GuzzleHttp\Psr7\Request;
 use InvalidArgumentException;
-use Psr\Http\Message\RequestInterface;
-use Psr\Http\Message\ResponseInterface;
+use RuntimeException;
 
 /**
- * HTTP-клиент amoCRM API v4 поверх Guzzle.
+ * HTTP-клиент amoCRM API v4 поверх cURL.
  *
  * Никаких настроек: домен и долгосрочный токен — всё, что нужно. Ответ
  * возвращается обычным массивом, любая ошибка приходит как ApiException.
  *
- * Запрос, упавший по временной причине, повторяется сам — до шести раз, с
- * паузой, которая удваивается: 1, 2, 4, 8, 16, 32 секунды. Столько ожидания
- * нужно потому, что превышенный лимит запросов amoCRM держит не мгновение.
- *
- * Что считается временным, зависит от метода. HTTP 429 повторяется всегда:
- * amoCRM отклоняет такой запрос целиком и записать ничего не успевает. Обрыв
- * связи и ошибки 5xx повторяются только у GET — у записи ответ мог потеряться
- * уже после того, как amoCRM всё создала, и повтор завёл бы вторую копию.
+ * Упавший запрос не повторяется: HTTP 429, 5xx и обрыв связи приходят
+ * вызывающему коду как ApiException. Только он знает, можно ли отправить
+ * запись заново и не завести при этом дубль.
  *
  * Запросы уходят по одному, в том порядке, в каком их сделал вызывающий код.
  *
@@ -36,14 +25,24 @@ use Psr\Http\Message\ResponseInterface;
  */
 final class ApiClient
 {
-    /** Сколько раз повторять запрос, упавший по временной причине. */
-    private const RETRY_ATTEMPTS = 6;
+    /** Сколько ждать ответа целиком, в секундах. */
+    private const TIMEOUT = 30;
 
-    /** Пауза перед первым повтором в миллисекундах; дальше удваивается. */
-    private const RETRY_BASE_DELAY_MS = 1000;
+    /** Сколько ждать соединения с amoCRM, в секундах. */
+    private const CONNECT_TIMEOUT = 10;
 
     private string $baseUrl;
-    private Client $http;
+
+    /** @var string[] */
+    private array $headers;
+
+    /**
+     * Одно соединение на клиент: запросы подряд, например обход страниц,
+     * не открывают TLS-соединение с amoCRM каждый раз заново.
+     *
+     * @var resource|\CurlHandle
+     */
+    private $curl;
 
     public function __construct(string $domain, string $longLivedToken)
     {
@@ -60,17 +59,20 @@ final class ApiClient
             throw new InvalidArgumentException('Долгосрочный токен amoCRM не должен быть пустым.');
         }
 
+        $curl = curl_init();
+
+        if ($curl === false) {
+            throw new RuntimeException('Не удалось инициализировать cURL.');
+        }
+
         $this->baseUrl = "https://$domain/";
-        $this->http = new Client([
-            'handler' => $this->handlerStack(),
-            'timeout' => 30,
-            'http_errors' => false,
-            'headers' => [
-                'Authorization' => 'Bearer ' . $token,
-                'Content-Type' => 'application/json',
-                'Accept' => 'application/json',
-            ],
-        ]);
+        $this->curl = $curl;
+        $this->headers = [
+            'Authorization: Bearer ' . $token,
+            'Content-Type: application/json',
+            'Accept: application/json',
+            'User-Agent: integrat-amocrm',
+        ];
     }
 
     public function get(string $endpoint, string $query = ''): array
@@ -100,84 +102,63 @@ final class ApiClient
      */
     private function send(string $method, string $endpoint, array $data, string $query): array
     {
-        $body = null;
+        $options = [
+            CURLOPT_URL => $this->buildUrl($endpoint, $query),
+            CURLOPT_CUSTOMREQUEST => $method,
+            CURLOPT_HTTPHEADER => $this->headers,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT => self::TIMEOUT,
+            CURLOPT_CONNECTTIMEOUT => self::CONNECT_TIMEOUT,
+            // Пустая строка — принять любое сжатие, которое умеет cURL.
+            CURLOPT_ENCODING => '',
+        ];
 
-        if ($data !== []) {
-            $body = json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        // Тело у записи отправляется всегда, даже пустое: без Content-Length
+        // часть серверов отвечает на POST и PUT ошибкой 411.
+        if ($method !== 'GET') {
+            $options[CURLOPT_POSTFIELDS] = $this->encodeBody($data, $method, $endpoint);
         }
 
-        $request = new Request($method, $this->buildUrl($endpoint, $query), [], $body);
+        // Настройки прошлого запроса сбрасываются, живое соединение остаётся.
+        curl_reset($this->curl);
+        curl_setopt_array($this->curl, $options);
 
-        try {
-            $response = $this->http->send($request);
-        } catch (GuzzleException $exception) {
+        $response = curl_exec($this->curl);
+
+        if ($response === false) {
             // Запрос не дошёл до amoCRM: обрыв связи, таймаут, неизвестный домен.
             throw new ApiException(
-                'Не удалось выполнить запрос к amoCRM. ' . $exception->getMessage(),
+                'Не удалось выполнить запрос к amoCRM. ' . curl_error($this->curl),
                 0,
                 $method,
                 $endpoint,
             );
         }
 
-        return $this->parseResponse($response, $method, $endpoint);
+        $statusCode = (int) curl_getinfo($this->curl, CURLINFO_RESPONSE_CODE);
+
+        return $this->parseResponse($statusCode, (string) $response, $method, $endpoint);
     }
 
-    /**
-     * Собрать стек обработчиков Guzzle с повторами.
-     *
-     * Повтор живёт на уровне одного запроса: пауза перед повторной попыткой
-     * останавливает вызывающий код до тех пор, пока запрос не завершится.
-     */
-    private function handlerStack(): HandlerStack
+    /** Закодировать данные запроса в JSON; без данных тело пустое. */
+    private function encodeBody(array $data, string $method, string $endpoint): string
     {
-        $stack = HandlerStack::create();
-
-        $stack->push(Middleware::retry(
-            static function (
-                int $retries,
-                RequestInterface $request,
-                ?ResponseInterface $response = null
-            ): bool {
-                if ($retries >= self::RETRY_ATTEMPTS) {
-                    return false;
-                }
-
-                // Ответа нет вовсе — значит обрыв связи или таймаут. Такой
-                // случай обозначается нулём: настоящего кода у него нет.
-                $statusCode = 0;
-
-                if ($response !== null) {
-                    $statusCode = $response->getStatusCode();
-                }
-
-                return self::isRetryable($request->getMethod(), $statusCode);
-            },
-            // Guzzle нумерует повторы с единицы: 1, 2, 4, 8, 16, 32 секунды.
-            static fn (int $retries): int => self::RETRY_BASE_DELAY_MS * (2 ** ($retries - 1)),
-        ));
-
-        return $stack;
-    }
-
-    /**
-     * Можно ли повторить запрос, упавший с таким кодом.
-     *
-     * HTTP 429 повторяется у любого метода: amoCRM отклоняет такой запрос
-     * целиком, записать ничего не успевает, и повтор ничего не задваивает.
-     *
-     * Обрыв связи (код 0) и ошибки 5xx повторяются только у GET. У записи по
-     * ним не видно, дошла она или нет: ответ мог потеряться уже после того, как
-     * amoCRM всё создала, и повтор завёл бы вторую копию. Такие запросы
-     * отправляет заново вызывающий код — он один знает, чем это грозит.
-     */
-    private static function isRetryable(string $method, int $statusCode): bool
-    {
-        if ($statusCode === 429) {
-            return true;
+        if ($data === []) {
+            return '';
         }
 
-        return $method === 'GET' && ($statusCode === 0 || $statusCode >= 500);
+        $body = json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+
+        if ($body === false) {
+            throw new ApiException(
+                'Не удалось закодировать данные запроса в JSON. ' . json_last_error_msg(),
+                0,
+                $method,
+                $endpoint,
+            );
+        }
+
+        return $body;
     }
 
     /** Собрать полный адрес запроса из эндпоинта и строки параметров. */
@@ -190,17 +171,31 @@ final class ApiClient
             return $url;
         }
 
-        // Строка параметров пишется как есть: пробелы, кириллицу и квадратные
-        // скобки Guzzle закодирует сам при сборке запроса, а уже закодированное
-        // (`%D0%9E`) второй раз не тронет. amoCRM понимает оба вида.
-        return $url . '?' . $query;
+        return $url . '?' . self::encodeQuery($query);
+    }
+
+    /**
+     * Закодировать строку параметров для адреса запроса.
+     *
+     * Строка пишется как есть: пробелы, кириллица и квадратные скобки
+     * кодируются здесь, а уже закодированное (`%D0%9E`) второй раз не
+     * трогается. amoCRM понимает оба вида.
+     */
+    private static function encodeQuery(string $query): string
+    {
+        $encoded = preg_replace_callback(
+            '/[^A-Za-z0-9_\-.~!$&\'()*+,;=%:@\/?]++|%(?![A-Fa-f0-9]{2})/',
+            static fn (array $match): string => rawurlencode($match[0]),
+            $query,
+        );
+
+        return $encoded ?? $query;
     }
 
     /** Разобрать ответ amoCRM или бросить ApiException. */
-    private function parseResponse(ResponseInterface $response, string $method, string $endpoint): array
+    private function parseResponse(int $statusCode, string $body, string $method, string $endpoint): array
     {
-        $statusCode = $response->getStatusCode();
-        $responseData = json_decode((string) $response->getBody(), true);
+        $responseData = json_decode($body, true);
 
         if (!is_array($responseData)) {
             $responseData = [];

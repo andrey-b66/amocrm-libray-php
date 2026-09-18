@@ -9,17 +9,13 @@
          beStrictAboutOutputDuringTests="true">
     <testsuites>
         <testsuite name="amocrm">
-            <directory>Tests</directory>
+            <directory>tests</directory>
         </testsuite>
     </testsuites>
 
     <coverage>
         <include>
-            <directory suffix=".php">Client</directory>
-            <directory suffix=".php">Exception</directory>
-            <directory suffix=".php">Facade</directory>
-            <directory suffix=".php">Repository</directory>
-            <directory suffix=".php">Support</directory>
+            <directory suffix=".php">src</directory>
         </include>
     </coverage>
 </phpunit>

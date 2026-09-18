@@ -74,7 +74,7 @@ final class Note
 
         $response = $this->request->get("api/v4/$entityType/$entityId/notes", $query);
 
-        return array_values($response['_embedded']['notes'] ?? []);
+        return $response['_embedded']['notes'] ?? [];
     }
 
     /** Найти примечание по ID. Возвращает null, если примечания нет. */

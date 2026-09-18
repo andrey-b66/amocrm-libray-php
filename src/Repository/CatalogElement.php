@@ -113,7 +113,7 @@ class CatalogElement extends AbstractApiRepository
             . '&filter[to_catalog_id]=' . $this->catalogId(),
         );
 
-        return array_values($response['_embedded']['links'] ?? []);
+        return $response['_embedded']['links'] ?? [];
     }
 
     /**
@@ -132,11 +132,11 @@ class CatalogElement extends AbstractApiRepository
             $elementId = $link['to_entity_id'] ?? null;
 
             if (is_int($elementId)) {
-                $elementIds[$elementId] = $elementId;
+                $elementIds[] = $elementId;
             }
         }
 
-        return $this->findByIds(array_values($elementIds));
+        return $this->findByIds($elementIds);
     }
 
     protected function endpoint(): string
