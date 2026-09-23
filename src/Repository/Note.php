@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace Amocrm\Repository;
 
 use Amocrm\Client\ApiClient;
-use Amocrm\Exception\ApiException;
+use Amocrm\Support\ApiReader;
 use Amocrm\Support\EntityType;
 
 /**
@@ -15,13 +15,11 @@ use Amocrm\Support\EntityType;
  */
 final class Note
 {
-    private const MAX_PAGE_SIZE = 250;
-
-    private ApiClient $request;
+    private ApiClient $client;
 
     public function __construct(ApiClient $apiClient)
     {
-        $this->request = $apiClient;
+        $this->client = $apiClient;
     }
 
     /**
@@ -37,7 +35,7 @@ final class Note
         $entityType = EntityType::validate($entityType);
         $data['entity_id'] = $entityId;
 
-        $response = $this->request->post("api/v4/$entityType/notes", [$data]);
+        $response = $this->client->post("api/v4/$entityType/notes", [$data]);
 
         return $response['_embedded']['notes'][0] ?? [];
     }
@@ -56,25 +54,23 @@ final class Note
     }
 
     /**
-     * Получить страницу примечаний конкретной сущности.
+     * Получить примечания конкретной сущности — одну страницу, несколько или все.
+     *
+     * Запрос и страницы задаются так же, как в find() у репозиториев.
      *
      * Пример: findForEntity('leads', $leadId, 'filter[note_type][0]=common')
+     * Пример: findForEntity('leads', $leadId, '', 250, null) — все примечания сущности
      */
     public function findForEntity(
         string $entityType,
         int $entityId,
         string $query = '',
-        int $page = 1,
-        int $limit = self::MAX_PAGE_SIZE
+        int $limit = ApiReader::MAX_PAGE_SIZE,
+        ?int $pages = 1
     ): array {
         $entityType = EntityType::validate($entityType);
 
-        $query = trim(trim($query), '&');
-        $query = ($query === '' ? '' : "$query&") . "page=$page&limit=$limit";
-
-        $response = $this->request->get("api/v4/$entityType/$entityId/notes", $query);
-
-        return $response['_embedded']['notes'] ?? [];
+        return ApiReader::pages($this->client, "api/v4/$entityType/$entityId/notes", 'notes', $query, $limit, $pages);
     }
 
     /** Найти примечание по ID. Возвращает null, если примечания нет. */
@@ -82,17 +78,7 @@ final class Note
     {
         $entityType = EntityType::validate($entityType);
 
-        try {
-            $note = $this->request->get("api/v4/$entityType/$entityId/notes/$noteId");
-        } catch (ApiException $exception) {
-            if ($exception->getCode() === 404) {
-                return null;
-            }
-
-            throw $exception;
-        }
-
-        return $note === [] ? null : $note;
+        return ApiReader::one($this->client, "api/v4/$entityType/$entityId/notes/$noteId");
     }
 
     /** Обновить примечание частичными данными формата amoCRM API v4. */
@@ -104,6 +90,6 @@ final class Note
     ): array {
         $entityType = EntityType::validate($entityType);
 
-        return $this->request->patch("api/v4/$entityType/$entityId/notes/$noteId", $data);
+        return $this->client->patch("api/v4/$entityType/$entityId/notes/$noteId", $data);
     }
 }

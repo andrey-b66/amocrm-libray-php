@@ -6,10 +6,16 @@
          colors="true"
          failOnRisky="true"
          failOnWarning="true"
-         beStrictAboutOutputDuringTests="true">
+         beStrictAboutOutputDuringTests="true"
+         defaultTestSuite="unit">
     <testsuites>
-        <testsuite name="amocrm">
+        <testsuite name="unit">
             <directory>tests</directory>
+            <exclude>tests/Live</exclude>
+        </testsuite>
+        <!-- Настоящий аккаунт из .env: composer test-live. -->
+        <testsuite name="live">
+            <directory>tests/Live</directory>
         </testsuite>
     </testsuites>
 

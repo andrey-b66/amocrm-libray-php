@@ -6,7 +6,6 @@ namespace Amocrm\Facade;
 
 use Amocrm\Client\ApiClient;
 use Amocrm\Repository\Call;
-use Amocrm\Repository\Catalog;
 use Amocrm\Repository\Company;
 use Amocrm\Repository\Contact;
 use Amocrm\Repository\Lead;
@@ -30,11 +29,15 @@ use Amocrm\Repository\User;
 final class Amocrm
 {
     private ApiClient $apiClient;
-    private ?Catalog $catalogs = null;
 
-    public function __construct(string $domain, string $longLivedToken)
-    {
-        $this->apiClient = new ApiClient($domain, $longLivedToken);
+    /** Таймауты в секундах: сколько ждать ответа целиком и сколько — соединения. */
+    public function __construct(
+        string $domain,
+        string $longLivedToken,
+        int $timeout = ApiClient::DEFAULT_TIMEOUT,
+        int $connectTimeout = ApiClient::DEFAULT_CONNECT_TIMEOUT
+    ) {
+        $this->apiClient = new ApiClient($domain, $longLivedToken, $timeout, $connectTimeout);
     }
 
     /** Получить репозиторий контактов. */
@@ -95,18 +98,6 @@ final class Amocrm
     public function tags(): Tag
     {
         return new Tag($this->apiClient);
-    }
-
-    /**
-     * Получить репозиторий списков: товаров, счетов и пользовательских.
-     *
-     * Товары — отдельный список, репозиторий которого берут у этого же:
-     * catalogs()->products(). Найденный список товаров он запоминает, поэтому
-     * сам репозиторий списков переиспользуется, а не создаётся каждый раз.
-     */
-    public function catalogs(): Catalog
-    {
-        return $this->catalogs ??= new Catalog($this->apiClient);
     }
 
     /** Получить низкоуровневый доступ к amoCRM API v4: get/post/patch/put. */

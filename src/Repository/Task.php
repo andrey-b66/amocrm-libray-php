@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Amocrm\Repository;
 
+use Amocrm\Support\ApiReader;
 use Amocrm\Support\EntityType;
 
 /**
@@ -24,7 +25,7 @@ final class Task extends AbstractApiRepository
     }
 
     /**
-     * Создать задачу, привязанную к сущности, по данным формата amoCRM API v4.
+     * Создать задачу, привязанную к сущности.
      *
      * Пример: createForEntity('leads', $leadId, [
      *     'text' => 'Перезвонить клиенту',
@@ -51,7 +52,7 @@ final class Task extends AbstractApiRepository
         string $entityType,
         int $entityId,
         string $query = '',
-        int $limit = self::MAX_PAGE_SIZE,
+        int $limit = ApiReader::MAX_PAGE_SIZE,
         ?int $pages = 1
     ): array {
         $entityType = EntityType::validate($entityType);

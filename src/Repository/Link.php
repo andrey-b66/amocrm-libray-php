@@ -6,172 +6,35 @@ namespace Amocrm\Repository;
 
 use Amocrm\Client\ApiClient;
 use Amocrm\Support\EntityType;
-use LogicException;
 
 /**
  * Репозиторий связей между контактами, сделками и компаниями.
  *
  * Связь двусторонняя: после привязки контакта к сделке она видна и у контакта,
- * и у сделки. Направление запроса определяет только endpoint API. Типы сущностей
- * — `contacts`, `leads` или `companies`.
+ * и у сделки, поэтому читать её можно с любой стороны.
  *
- * Пример: linkContactToLead($contactId, $leadId, true) — третий аргумент делает
- * контакт главным для сделки.
+ * Чтение отдаёт связи — пары ID и `metadata`. Сами сущности грузят их
+ * репозитории: так видно, сколько запросов уходит, и можно взять только нужные.
+ *
+ * Пример: $links = $amocrm->links()->findLinks('leads', $leadId);
+ *         $contacts = $amocrm->contacts()->findByIds([5, 6]);
  */
 final class Link
 {
-    private ApiClient $request;
+    private ApiClient $client;
 
     public function __construct(ApiClient $apiClient)
     {
-        $this->request = $apiClient;
+        $this->client = $apiClient;
     }
 
     /**
-     * Связать две сущности произвольного направления.
+     * Связать контакт со сделкой.
      *
-     * `$metadata` — дополнительные данные связи, например `['is_main' => true]`.
-     *
-     * Пример: link('leads', $leadId, 'contacts', $contactId, ['is_main' => true])
+     * Третий аргумент делает контакт главным у сделки. По умолчанию признак не
+     * передаётся вовсе, и amoCRM решает сама: первый контакт сделки становится
+     * главным.
      */
-    public function link(
-        string $sourceType,
-        int $sourceId,
-        string $targetType,
-        int $targetId,
-        array $metadata = []
-    ): array {
-        $sourceType = EntityType::validate($sourceType);
-
-        $response = $this->request->post(
-            "api/v4/$sourceType/$sourceId/link",
-            [$this->buildPayload($targetType, $targetId, $metadata)],
-        );
-
-        return $response['_embedded']['links'][0] ?? [];
-    }
-
-    /** Отвязать две сущности. */
-    public function unlink(
-        string $sourceType,
-        int $sourceId,
-        string $targetType,
-        int $targetId,
-        array $metadata = []
-    ): bool {
-        $sourceType = EntityType::validate($sourceType);
-
-        $this->request->post(
-            "api/v4/$sourceType/$sourceId/unlink",
-            [$this->buildPayload($targetType, $targetId, $metadata)],
-        );
-
-        return true;
-    }
-
-    /**
-     * Получить связи сущности — пары ID, без данных самих сущностей.
-     *
-     * Пример: findForEntity('leads', $leadId) — все связи сделки
-     * Пример: findForEntity('leads', $leadId, 'contacts') — только контакты
-     */
-    public function findForEntity(
-        string $entityType,
-        int $entityId,
-        ?string $targetType = null,
-        ?int $targetId = null
-    ): array {
-        $entityType = EntityType::validate($entityType);
-        $query = '';
-
-        if ($targetType !== null) {
-            $query = 'filter[to_entity_type]=' . EntityType::validate($targetType);
-        }
-
-        if ($targetId !== null) {
-            $query .= "&filter[to_entity_id]=$targetId";
-        }
-
-        $response = $this->request->get("api/v4/$entityType/$entityId/links", $query);
-
-        return $response['_embedded']['links'] ?? [];
-    }
-
-    /**
-     * Получить связанные сущности целиком, а не только пары ID.
-     *
-     * Пример: findRelatedEntities('leads', $leadId, 'contacts', 'companies')
-     */
-    public function findRelatedEntities(
-        string $sourceType,
-        int $sourceId,
-        string $targetType,
-        string $with = ''
-    ): array {
-        $targetType = EntityType::validate($targetType);
-        $targetIds = [];
-
-        foreach ($this->findForEntity($sourceType, $sourceId, $targetType) as $link) {
-            $targetId = $link['to_entity_id'] ?? null;
-
-            if (is_int($targetId) && ($link['to_entity_type'] ?? null) === $targetType) {
-                $targetIds[] = $targetId;
-            }
-        }
-
-        return $this->repository($targetType)->findByIds($targetIds, $with);
-    }
-
-    public function findLeadsForContact(int $contactId, string $with = ''): array
-    {
-        return $this->findRelatedEntities(EntityType::CONTACT, $contactId, EntityType::LEAD, $with);
-    }
-
-    public function findCompanyForContact(int $contactId, string $with = ''): ?array
-    {
-        return $this->findRelatedEntities(EntityType::CONTACT, $contactId, EntityType::COMPANY, $with)[0] ?? null;
-    }
-
-    public function findContactsForCompany(int $companyId, string $with = ''): array
-    {
-        return $this->findRelatedEntities(EntityType::COMPANY, $companyId, EntityType::CONTACT, $with);
-    }
-
-    public function findLeadsForCompany(int $companyId, string $with = ''): array
-    {
-        return $this->findRelatedEntities(EntityType::COMPANY, $companyId, EntityType::LEAD, $with);
-    }
-
-    public function findContactsForLead(int $leadId, string $with = ''): array
-    {
-        return $this->findRelatedEntities(EntityType::LEAD, $leadId, EntityType::CONTACT, $with);
-    }
-
-    public function findFirstContactForLead(int $leadId, string $with = ''): ?array
-    {
-        return $this->findContactsForLead($leadId, $with)[0] ?? null;
-    }
-
-    /** Получить главный контакт сделки по метаданным связи `is_main`. */
-    public function findMainContactForLead(int $leadId, string $with = ''): ?array
-    {
-        foreach ($this->findForEntity(EntityType::LEAD, $leadId, EntityType::CONTACT) as $link) {
-            $contactId = $link['to_entity_id'] ?? null;
-
-            if (($link['metadata']['is_main'] ?? false) === true && is_int($contactId)) {
-                return $this->repository(EntityType::CONTACT)->findById($contactId, $with);
-            }
-        }
-
-        return null;
-    }
-
-    public function findCompanyForLead(int $leadId, string $with = ''): ?array
-    {
-        return $this->findRelatedEntities(EntityType::LEAD, $leadId, EntityType::COMPANY, $with)[0] ?? null;
-    }
-
-    /** Связать контакт со сделкой. */
     public function linkContactToLead(int $contactId, int $leadId, ?bool $isMain = null): array
     {
         $metadata = $isMain === null ? [] : ['is_main' => $isMain];
@@ -191,47 +54,128 @@ final class Link
         return $this->link(EntityType::COMPANY, $companyId, EntityType::CONTACT, $contactId);
     }
 
-    public function unlinkContactFromLead(int $contactId, int $leadId): bool
+    public function unlinkContactFromLead(int $contactId, int $leadId): void
     {
-        return $this->unlink(EntityType::LEAD, $leadId, EntityType::CONTACT, $contactId);
+        $this->unlink(EntityType::LEAD, $leadId, EntityType::CONTACT, $contactId);
     }
 
-    public function unlinkCompanyFromLead(int $companyId, int $leadId): bool
+    public function unlinkCompanyFromLead(int $companyId, int $leadId): void
     {
-        return $this->unlink(EntityType::LEAD, $leadId, EntityType::COMPANY, $companyId);
+        $this->unlink(EntityType::LEAD, $leadId, EntityType::COMPANY, $companyId);
     }
 
-    public function unlinkContactFromCompany(int $contactId, int $companyId): bool
+    public function unlinkContactFromCompany(int $contactId, int $companyId): void
     {
-        return $this->unlink(EntityType::COMPANY, $companyId, EntityType::CONTACT, $contactId);
+        $this->unlink(EntityType::COMPANY, $companyId, EntityType::CONTACT, $contactId);
     }
 
-    private function buildPayload(string $targetType, int $targetId, array $metadata): array
+    /**
+     * Получить все связи сущности — пары ID и `metadata`.
+     *
+     * Нужные отбирают по `to_entity_type`, а сущности грузят их репозиторием:
+     *
+     *     $contactIds = [];
+     *     foreach ($amocrm->links()->findLinks('leads', $leadId) as $link) {
+     *         if ($link['to_entity_type'] === 'contacts') {
+     *             $contactIds[] = $link['to_entity_id'];
+     *         }
+     *     }
+     *     $contacts = $amocrm->contacts()->findByIds($contactIds);
+     */
+    public function findLinks(string $entityType, int $entityId): array
     {
-        $payload = [
-            'to_entity_id' => $targetId,
-            'to_entity_type' => EntityType::validate($targetType),
-        ];
+        $entityType = EntityType::validate($entityType);
+
+        // Фильтры в запрос не кладутся: по одному типу или одному ID amoCRM их
+        // молча пропускает и всё равно отдаёт все связи. Страниц у связей тоже
+        // нет — `page` и `limit` она пропускает так же.
+        $response = $this->client->get("api/v4/$entityType/$entityId/links");
+
+        return $response['_embedded']['links'] ?? [];
+    }
+
+    /**
+     * Получить сделки контакта или компании, кроме закрытых.
+     *
+     * Фильтровать это на стороне amoCRM нельзя: она отбирает только по
+     * перечисленным статусам, а не по всем, кроме перечисленных. Поэтому
+     * закрытые отсеиваются здесь, уже после загрузки сделок.
+     *
+     * Пример: findActiveLeads('contacts', $contactId)
+     */
+    public function findActiveLeads(
+        string $entityType,
+        int $entityId,
+        array $excludedStatusIds = Lead::DEFAULT_CLOSED_STATUS_IDS,
+        string $with = ''
+    ): array {
+        $leadIds = [];
+
+        foreach ($this->findLinks($entityType, $entityId) as $link) {
+            $leadId = $link['to_entity_id'] ?? null;
+
+            if (($link['to_entity_type'] ?? null) === EntityType::LEAD && is_int($leadId)) {
+                $leadIds[] = $leadId;
+            }
+        }
+
+        $active = [];
+
+        foreach ((new Lead($this->client))->findByIds($leadIds, $with) as $lead) {
+            if (!in_array($lead['status_id'] ?? null, $excludedStatusIds, true)) {
+                $active[] = $lead;
+            }
+        }
+
+        return $active;
+    }
+
+    /**
+     * Получить главный контакт сделки.
+     *
+     * При привязке главный контакт помечается `is_main`, а в прочитанных
+     * связях amoCRM называет тот же признак иначе — `main_contact`.
+     */
+    public function findMainContactForLead(int $leadId, string $with = ''): ?array
+    {
+        foreach ($this->findLinks(EntityType::LEAD, $leadId) as $link) {
+            $contactId = $link['to_entity_id'] ?? null;
+
+            if (($link['to_entity_type'] ?? null) !== EntityType::CONTACT) {
+                continue;
+            }
+
+            if (($link['metadata']['main_contact'] ?? false) === true && is_int($contactId)) {
+                return (new Contact($this->client))->findById($contactId, $with);
+            }
+        }
+
+        return null;
+    }
+
+    private function link(
+        string $sourceType,
+        int $sourceId,
+        string $targetType,
+        int $targetId,
+        array $metadata = []
+    ): array {
+        $payload = ['to_entity_id' => $targetId, 'to_entity_type' => $targetType];
 
         if ($metadata !== []) {
             $payload['metadata'] = $metadata;
         }
 
-        return $payload;
+        $response = $this->client->post("api/v4/$sourceType/$sourceId/link", [$payload]);
+
+        return $response['_embedded']['links'][0] ?? [];
     }
 
-    /** Сущности грузит их собственный репозиторий — он уже умеет и пачки, и `with`. */
-    private function repository(string $entityType): AbstractApiRepository
+    private function unlink(string $sourceType, int $sourceId, string $targetType, int $targetId): void
     {
-        switch (EntityType::validate($entityType)) {
-            case EntityType::CONTACT:
-                return new Contact($this->request);
-            case EntityType::LEAD:
-                return new Lead($this->request);
-            case EntityType::COMPANY:
-                return new Company($this->request);
-            default:
-                throw new LogicException('Нет репозитория для типа сущности `' . $entityType . '`.');
-        }
+        $this->client->post(
+            "api/v4/$sourceType/$sourceId/unlink",
+            [['to_entity_id' => $targetId, 'to_entity_type' => $targetType]],
+        );
     }
 }

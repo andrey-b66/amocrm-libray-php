@@ -4,12 +4,16 @@ declare(strict_types=1);
 
 namespace Amocrm\Repository;
 
-use Amocrm\Exception\ApiException;
-use Amocrm\Support\EntityType;
-
-/** Репозиторий сделок amoCRM (сущность lead в API). */
-final class Lead extends AbstractApiRepository
+/**
+ * Репозиторий сделок amoCRM (сущность lead в API).
+ *
+ * Сделки связанного контакта или компании берут у репозитория связей:
+ * links()->findLinks('contacts', $contactId) и
+ * links()->findActiveLeads('contacts', $contactId).
+ */
+final class Lead extends AbstractSearchableRepository
 {
+    /** Статусы «успешно реализовано» и «закрыто и не реализовано». */
     public const DEFAULT_CLOSED_STATUS_IDS = [142, 143];
 
     protected function endpoint(): string
@@ -20,61 +24,5 @@ final class Lead extends AbstractApiRepository
     protected function embeddedKey(): string
     {
         return 'leads';
-    }
-
-    /** Получить все активные сделки контакта. */
-    public function findActiveByContactId(
-        int $contactId,
-        array $excludedStatusIds = self::DEFAULT_CLOSED_STATUS_IDS
-    ): array {
-        return $this->findActiveByRelatedEntity(EntityType::CONTACT, $contactId, $excludedStatusIds);
-    }
-
-    /** Найти все активные сделки, связанные с компанией. */
-    public function findActiveByCompanyId(
-        int $companyId,
-        array $excludedStatusIds = self::DEFAULT_CLOSED_STATUS_IDS
-    ): array {
-        return $this->findActiveByRelatedEntity(EntityType::COMPANY, $companyId, $excludedStatusIds);
-    }
-
-    private function findActiveByRelatedEntity(
-        string $entityType,
-        int $entityId,
-        array $excludedStatusIds
-    ): array {
-        $entityType = EntityType::validate($entityType);
-
-        try {
-            $entity = $this->request->get("api/v4/$entityType/$entityId", 'with=leads');
-        } catch (ApiException $exception) {
-            if ($exception->getCode() === 404) {
-                return [];
-            }
-
-            throw $exception;
-        }
-
-        $leadIds = [];
-
-        foreach ($entity['_embedded']['leads'] ?? [] as $linkedLead) {
-            $leadId = $linkedLead['id'] ?? null;
-
-            if (is_int($leadId)) {
-                $leadIds[] = $leadId;
-            }
-        }
-
-        $activeLeads = [];
-
-        // amoCRM умеет фильтровать только по включённым статусам, поэтому
-        // закрытые сделки отсеиваем уже здесь.
-        foreach ($this->findByIds($leadIds) as $lead) {
-            if (!in_array($lead['status_id'] ?? null, $excludedStatusIds, true)) {
-                $activeLeads[] = $lead;
-            }
-        }
-
-        return $activeLeads;
     }
 }

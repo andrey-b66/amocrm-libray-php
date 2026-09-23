@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Amocrm\Repository;
 
 use Amocrm\Client\ApiClient;
+use Amocrm\Support\ApiReader;
 use Amocrm\Support\EntityType;
 
 /**
@@ -14,34 +15,30 @@ use Amocrm\Support\EntityType;
  */
 final class Tag
 {
-    private const MAX_PAGE_SIZE = 250;
-
-    private ApiClient $request;
+    private ApiClient $client;
 
     public function __construct(ApiClient $apiClient)
     {
-        $this->request = $apiClient;
+        $this->client = $apiClient;
     }
 
     /**
-     * Получить страницу тегов из справочника.
+     * Получить теги из справочника — одну страницу, несколько или все.
+     *
+     * Запрос и страницы задаются так же, как в find() у репозиториев.
      *
      * Пример: find('leads', 'query=Важная заявка')
+     * Пример: find('leads', '', 250, null) — весь справочник
      */
     public function find(
         string $entityType,
         string $query = '',
-        int $page = 1,
-        int $limit = self::MAX_PAGE_SIZE
+        int $limit = ApiReader::MAX_PAGE_SIZE,
+        ?int $pages = 1
     ): array {
         $entityType = EntityType::validate($entityType);
 
-        $query = trim(trim($query), '&');
-        $query = ($query === '' ? '' : "$query&") . "page=$page&limit=$limit";
-
-        $response = $this->request->get("api/v4/$entityType/tags", $query);
-
-        return $response['_embedded']['tags'] ?? [];
+        return ApiReader::pages($this->client, "api/v4/$entityType/tags", 'tags', $query, $limit, $pages);
     }
 
     /**
@@ -53,7 +50,7 @@ final class Tag
     {
         $entityType = EntityType::validate($entityType);
 
-        $response = $this->request->post("api/v4/$entityType/tags", [$data]);
+        $response = $this->client->post("api/v4/$entityType/tags", [$data]);
 
         return $response['_embedded']['tags'][0] ?? [];
     }
@@ -85,7 +82,7 @@ final class Tag
     {
         $entityType = EntityType::validate($entityType);
 
-        return $this->request->patch(
+        return $this->client->patch(
             "api/v4/$entityType/$entityId",
             ['_embedded' => ['tags' => null]],
         );
@@ -98,22 +95,35 @@ final class Tag
         array $tags
     ): array {
         $entityType = EntityType::validate($entityType);
+        $payload = [];
 
-        $tags = array_map(
-            static function ($tag): array {
-                if (is_array($tag)) {
-                    return $tag;
-                }
+        foreach ($tags as $tag) {
+            $payload[] = self::tagPayload($tag);
+        }
 
-                if (is_int($tag)) {
-                    return ['id' => $tag];
-                }
+        return $this->client->patch("api/v4/$entityType/$entityId", [$operation => $payload]);
+    }
 
-                return ['name' => (string) $tag];
-            },
-            $tags,
-        );
+    /**
+     * Привести тег к формату amoCRM.
+     *
+     * Целое число — это ID существующего тега. Строка — название: amoCRM
+     * найдёт тег с таким названием или заведёт новый. Поэтому числовая
+     * строка '15' — это название «15», а не ID. Массив уходит как есть: так
+     * передают тег целиком, например вместе с цветом.
+     *
+     * @param mixed $tag
+     */
+    private static function tagPayload($tag): array
+    {
+        if (is_array($tag)) {
+            return $tag;
+        }
 
-        return $this->request->patch("api/v4/$entityType/$entityId", [$operation => $tags]);
+        if (is_int($tag)) {
+            return ['id' => $tag];
+        }
+
+        return ['name' => (string) $tag];
     }
 }

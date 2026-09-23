@@ -6,76 +6,40 @@ namespace Amocrm\Tests\Client;
 
 use Amocrm\Client\ApiClient;
 use Amocrm\Exception\ApiException;
+use Amocrm\Tests\Fake\FakeAmocrmTestCase;
 use InvalidArgumentException;
-use PHPUnit\Framework\TestCase;
 use ReflectionProperty;
-use RuntimeException;
 
-/**
- * Запросы уходят на встроенный PHP-сервер, который отвечает тем, каким
- * запрос до него дошёл, — см. server.php рядом.
- *
- * @requires extension curl
- */
-final class ApiClientTest extends TestCase
+final class ApiClientTest extends FakeAmocrmTestCase
 {
-    /** @var resource|null */
-    private static $server = null;
-
-    private static string $serverUrl;
-
-    public static function setUpBeforeClass(): void
-    {
-        $port = self::freePort();
-
-        self::$server = proc_open(
-            [PHP_BINARY, '-S', "127.0.0.1:$port", __DIR__ . '/server.php'],
-            [
-                ['pipe', 'r'],
-                ['file', self::nullDevice(), 'w'],
-                ['file', self::nullDevice(), 'w'],
-            ],
-            $pipes,
-        );
-
-        if (!is_resource(self::$server)) {
-            throw new RuntimeException('Не удалось запустить тестовый сервер.');
-        }
-
-        self::$serverUrl = "http://127.0.0.1:$port/";
-        self::waitForPort($port);
-    }
-
-    public static function tearDownAfterClass(): void
-    {
-        if (is_resource(self::$server)) {
-            proc_terminate(self::$server);
-            proc_close(self::$server);
-        }
-
-        self::$server = null;
-    }
-
     /** @dataProvider writeMethods */
     public function testWriteMethodSendsJsonBody(string $method): void
     {
+        $this->respond(['id' => 1]);
+
         $response = $this->client()->$method('api/v4/leads', [['name' => 'Сделка/1', 'price' => 10]]);
 
-        self::assertSame(strtoupper($method), $response['method']);
-        self::assertSame('/api/v4/leads', $response['uri']);
-        // Кириллица и слеши уходят как есть, без С и \/.
-        self::assertSame('[{"name":"Сделка/1","price":10}]', $response['body']);
+        self::assertSame(['id' => 1], $response);
+
+        $request = $this->lastRequest();
+        self::assertSame(strtoupper($method), $request['method']);
+        self::assertSame('/api/v4/leads', $request['uri']);
+        // Кириллица и слеши уходят как есть, без экранирования.
+        self::assertSame('[{"name":"Сделка/1","price":10}]', $request['rawBody']);
     }
 
     /** @dataProvider writeMethods */
     public function testWriteMethodWithoutDataSendsEmptyBody(string $method): void
     {
-        $response = $this->client()->$method('api/v4/leads/1/unlink');
+        $this->respondNoContent();
 
-        self::assertSame(strtoupper($method), $response['method']);
-        self::assertSame('', $response['body']);
+        $this->client()->$method('api/v4/leads/1/unlink');
+
+        $request = $this->lastRequest();
+        self::assertSame(strtoupper($method), $request['method']);
+        self::assertSame('', $request['rawBody']);
         // Без Content-Length часть серверов отвечает на такой запрос ошибкой 411.
-        self::assertSame('0', $response['headers']['content-length'] ?? null);
+        self::assertSame('0', $request['headers']['content-length'] ?? null);
     }
 
     public function writeMethods(): array
@@ -89,17 +53,23 @@ final class ApiClientTest extends TestCase
 
     public function testGetSendsNoBody(): void
     {
-        $response = $this->client()->get('api/v4/leads');
+        $this->respond([]);
 
-        self::assertSame('GET', $response['method']);
-        self::assertSame('', $response['body']);
-        self::assertArrayNotHasKey('content-length', $response['headers']);
+        $this->client()->get('api/v4/leads');
+
+        $request = $this->lastRequest();
+        self::assertSame('GET', $request['method']);
+        self::assertSame('', $request['rawBody']);
+        self::assertArrayNotHasKey('content-length', $request['headers']);
     }
 
     public function testSendsAuthorizationAndJsonHeaders(): void
     {
-        $headers = $this->client(' token-123 ')->get('api/v4/account')['headers'];
+        $this->respond([]);
 
+        $this->client(' token-123 ')->get('api/v4/account');
+
+        $headers = $this->lastRequest()['headers'];
         // Пробелы вокруг токена отрезаются.
         self::assertSame('Bearer token-123', $headers['authorization']);
         self::assertSame('application/json', $headers['content-type']);
@@ -110,7 +80,11 @@ final class ApiClientTest extends TestCase
     /** @dataProvider queries */
     public function testBuildsUrl(string $endpoint, string $query, string $expectedUri): void
     {
-        self::assertSame($expectedUri, $this->client()->get($endpoint, $query)['uri']);
+        $this->respond([]);
+
+        $this->client()->get($endpoint, $query);
+
+        self::assertSame($expectedUri, $this->lastRequest()['uri']);
     }
 
     public function queries(): array
@@ -141,18 +115,23 @@ final class ApiClientTest extends TestCase
     public function testReturnsDecodedResponse(): void
     {
         $data = ['_embedded' => ['leads' => [['id' => 1, 'name' => 'Сделка']]]];
+        $this->respond($data);
 
-        self::assertSame($data, $this->client()->post('status/200', $data));
+        self::assertSame($data, $this->client()->get('api/v4/leads'));
     }
 
     public function testNoContentReturnsEmptyArray(): void
     {
-        self::assertSame([], $this->client()->get('empty'));
+        $this->respondNoContent();
+
+        self::assertSame([], $this->client()->get('api/v4/leads'));
     }
 
     public function testNonJsonResponseReturnsEmptyArray(): void
     {
-        self::assertSame([], $this->client()->get('not-json'));
+        $this->respondRaw('<html>Внутренняя ошибка</html>');
+
+        self::assertSame([], $this->client()->get('api/v4/leads'));
     }
 
     public function testHttpErrorThrowsApiException(): void
@@ -162,36 +141,39 @@ final class ApiClientTest extends TestCase
             'detail' => 'Поле name обязательно',
             'validation-errors' => [['request_id' => '0', 'errors' => [['path' => 'name']]]],
         ];
+        $this->respond($responseData, 400);
 
-        try {
-            $this->client()->post('status/400', $responseData);
-            self::fail('Ожидалось ApiException.');
-        } catch (ApiException $exception) {
-            self::assertSame('amoCRM отклонила данные запроса. Поле name обязательно', $exception->getMessage());
-            self::assertSame(400, $exception->getStatusCode());
-            self::assertSame(400, $exception->getCode());
-            self::assertSame('POST', $exception->getHttpMethod());
-            self::assertSame('status/400', $exception->getEndpoint());
-            self::assertSame($responseData, $exception->getResponseData());
-            self::assertSame($responseData['validation-errors'], $exception->getValidationErrors());
-        }
+        $exception = self::exceptionFrom(fn () => $this->client()->post('api/v4/leads', [['price' => 1]]));
+
+        self::assertInstanceOf(ApiException::class, $exception);
+        self::assertSame('amoCRM отклонила данные запроса. Поле name обязательно', $exception->getMessage());
+        self::assertSame(400, $exception->getStatusCode());
+        self::assertSame(400, $exception->getCode());
+        self::assertSame('POST', $exception->getHttpMethod());
+        self::assertSame('api/v4/leads', $exception->getEndpoint());
+        self::assertSame($responseData, $exception->getResponseData());
+        self::assertSame($responseData['validation-errors'], $exception->getValidationErrors());
     }
 
     /** @dataProvider errorStatuses */
     public function testErrorMessageDependsOnStatus(int $statusCode, string $expectedMessage): void
     {
+        $this->respond([], $statusCode);
+
         $this->expectException(ApiException::class);
         $this->expectExceptionCode($statusCode);
         $this->expectExceptionMessage($expectedMessage);
 
-        $this->client()->get("status/$statusCode");
+        $this->client()->get('api/v4/leads');
     }
 
     public function errorStatuses(): array
     {
         return [
             '401' => [401, 'Долгосрочный токен amoCRM недействителен или отозван.'],
-            '403' => [403, 'Недостаточно прав для выполнения запроса к amoCRM.'],
+            '402' => [402, 'Аккаунт amoCRM не оплачен или возможность не входит в тариф.'],
+            // Тем же кодом amoCRM отвечает на блокировку за частые запросы.
+            '403' => [403, 'amoCRM отклонила запрос: недостаточно прав или аккаунт заблокирован.'],
             '404' => [404, 'Запрошенный ресурс amoCRM не найден.'],
             '429' => [429, 'Превышен лимит запросов к amoCRM.'],
             '500' => [500, 'Сервис amoCRM временно недоступен.'],
@@ -204,55 +186,50 @@ final class ApiClientTest extends TestCase
 
     public function testConnectionFailureThrowsApiExceptionWithZeroStatus(): void
     {
-        $client = $this->client('token', 'http://127.0.0.1:' . self::freePort() . '/');
+        $client = $this->client();
+        self::setBaseUrl($client, 'http://127.0.0.1:' . self::freePort() . '/');
 
-        try {
-            $client->get('api/v4/leads');
-            self::fail('Ожидалось ApiException.');
-        } catch (ApiException $exception) {
-            self::assertStringStartsWith('Не удалось выполнить запрос к amoCRM.', $exception->getMessage());
-            self::assertSame(0, $exception->getStatusCode());
-            self::assertSame('GET', $exception->getHttpMethod());
-            self::assertSame('api/v4/leads', $exception->getEndpoint());
-        }
+        $exception = self::exceptionFrom(fn () => $client->get('api/v4/leads'));
+
+        self::assertInstanceOf(ApiException::class, $exception);
+        self::assertStringStartsWith('Не удалось выполнить запрос к amoCRM.', $exception->getMessage());
+        self::assertSame(0, $exception->getStatusCode());
+        self::assertSame('GET', $exception->getHttpMethod());
+        self::assertSame('api/v4/leads', $exception->getEndpoint());
     }
 
     public function testInvalidUtf8ThrowsBeforeSending(): void
     {
-        // Сервера по этому адресу нет: уйди запрос в сеть, ошибка была бы про соединение.
-        $client = $this->client('token', 'http://127.0.0.1:' . self::freePort() . '/');
-
         $this->expectException(ApiException::class);
         $this->expectExceptionMessage('Не удалось закодировать данные запроса в JSON.');
 
-        $client->post('api/v4/leads', [['name' => "\xB1\x31"]]);
+        try {
+            $this->client()->post('api/v4/leads', [['name' => "\xB1\x31"]]);
+        } finally {
+            self::assertSame([], $this->requests());
+        }
     }
 
     public function testClientStaysUsableAfterError(): void
     {
+        $this->respond(['detail' => 'ошибка'], 400);
+        $this->respond(['ok' => true]);
         $client = $this->client();
 
-        try {
-            $client->post('status/400', ['detail' => 'ошибка']);
-            self::fail('Ожидалось ApiException.');
-        } catch (ApiException $exception) {
-            self::assertSame(400, $exception->getStatusCode());
-        }
+        self::assertInstanceOf(ApiException::class, self::exceptionFrom(fn () => $client->post('api/v4/leads', ['a' => 1])));
+        self::assertSame(['ok' => true], $client->get('api/v4/leads', 'page=2'));
 
         // Настройки прошлого запроса не протекают в следующий: у GET нет тела.
-        $response = $client->get('api/v4/leads', 'page=2');
-
-        self::assertSame('GET', $response['method']);
-        self::assertSame('/api/v4/leads?page=2', $response['uri']);
-        self::assertSame('', $response['body']);
+        $request = $this->lastRequest();
+        self::assertSame('GET', $request['method']);
+        self::assertSame('/api/v4/leads?page=2', $request['uri']);
+        self::assertSame('', $request['rawBody']);
     }
 
     /** @dataProvider domains */
     public function testNormalizesDomain(string $domain): void
     {
-        $client = new ApiClient($domain, 'token');
-
-        self::assertSame('https://example.amocrm.ru/', self::baseUrl($client)->getValue($client));
+        self::assertSame('https://example.amocrm.ru/', self::baseUrlOf(new ApiClient($domain, 'token')));
     }
 
     public function domains(): array
@@ -273,6 +250,48 @@ final class ApiClientTest extends TestCase
         new ApiClient($domain, $token);
     }
 
+    public function testUsesGivenTimeouts(): void
+    {
+        $client = new ApiClient('example.amocrm.ru', 'token', 90, 5);
+
+        self::assertSame(90, self::privateValue($client, 'timeout'));
+        self::assertSame(5, self::privateValue($client, 'connectTimeout'));
+    }
+
+    public function testDefaultTimeouts(): void
+    {
+        $client = new ApiClient('example.amocrm.ru', 'token');
+
+        self::assertSame(ApiClient::DEFAULT_TIMEOUT, self::privateValue($client, 'timeout'));
+        self::assertSame(ApiClient::DEFAULT_CONNECT_TIMEOUT, self::privateValue($client, 'connectTimeout'));
+    }
+
+    /** @dataProvider invalidTimeouts */
+    public function testRejectsNonPositiveTimeouts(int $timeout, int $connectTimeout): void
+    {
+        // Ноль для cURL означает «ждать без конца».
+        $this->expectException(InvalidArgumentException::class);
+
+        new ApiClient('example.amocrm.ru', 'token', $timeout, $connectTimeout);
+    }
+
+    public function invalidTimeouts(): array
+    {
+        return [
+            'ноль на ответ' => [0, 10],
+            'минус на ответ' => [-1, 10],
+            'ноль на соединение' => [30, 0],
+        ];
+    }
+
+    private static function privateValue(ApiClient $client, string $property): int
+    {
+        $reflection = new ReflectionProperty($client, $property);
+        $reflection->setAccessible(true);
+
+        return $reflection->getValue($client);
+    }
+
     public function invalidCredentials(): array
     {
         return [
@@ -281,64 +300,5 @@ final class ApiClientTest extends TestCase
             'пустой токен' => ['example.amocrm.ru', ''],
             'токен из пробелов' => ['example.amocrm.ru', '   '],
         ];
-    }
-
-    /**
-     * Клиент на тестовом сервере.
-     *
-     * Сам клиент всегда ходит по https, а тестовый сервер понимает только
-     * http, поэтому адрес подменяется в обход конструктора.
-     */
-    private function client(string $token = 'token', ?string $baseUrl = null): ApiClient
-    {
-        $client = new ApiClient('example.amocrm.ru', $token);
-        self::baseUrl($client)->setValue($client, $baseUrl ?? self::$serverUrl);
-
-        return $client;
-    }
-
-    private static function baseUrl(ApiClient $client): ReflectionProperty
-    {
-        $property = new ReflectionProperty($client, 'baseUrl');
-        $property->setAccessible(true);
-
-        return $property;
-    }
-
-    /** Порт, который прямо сейчас никто не слушает. */
-    private static function freePort(): int
-    {
-        $socket = stream_socket_server('tcp://127.0.0.1:0');
-
-        if ($socket === false) {
-            throw new RuntimeException('Не удалось найти свободный порт.');
-        }
-
-        $address = (string) stream_socket_get_name($socket, false);
-        fclose($socket);
-
-        return (int) substr($address, strrpos($address, ':') + 1);
-    }
-
-    private static function waitForPort(int $port): void
-    {
-        for ($attempt = 0; $attempt < 50; $attempt++) {
-            $connection = @fsockopen('127.0.0.1', $port);
-
-            if ($connection !== false) {
-                fclose($connection);
-
-                return;
-            }
-
-            usleep(100000);
-        }
-
-        throw new RuntimeException("Тестовый сервер не поднялся на порту $port.");
-    }
-
-    private static function nullDevice(): string
-    {
-        return DIRECTORY_SEPARATOR === '\\' ? 'NUL' : '/dev/null';
     }
 }

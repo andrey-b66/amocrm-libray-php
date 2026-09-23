@@ -5,40 +5,24 @@ declare(strict_types=1);
 namespace Amocrm\Repository;
 
 use Amocrm\Client\ApiClient;
-use Amocrm\Exception\ApiException;
+use Amocrm\Support\ApiReader;
 
 /** Репозиторий пользователей аккаунта amoCRM. */
 final class User
 {
     private const ENDPOINT = 'api/v4/users';
-    private const PAGE_SIZE = 250;
 
-    private ApiClient $request;
+    private ApiClient $client;
 
     public function __construct(ApiClient $apiClient)
     {
-        $this->request = $apiClient;
+        $this->client = $apiClient;
     }
 
     /** Получить всех пользователей со всех страниц API. Активность — в `rights.is_active`. */
     public function getAll(): array
     {
-        $users = [];
-        $page = 1;
-
-        do {
-            $response = $this->request->get(self::ENDPOINT, "page=$page&limit=" . self::PAGE_SIZE);
-            $pageUsers = $response['_embedded']['users'] ?? [];
-
-            foreach ($pageUsers as $user) {
-                $users[] = $user;
-            }
-
-            $hasNextPage = $pageUsers !== [] && isset($response['_links']['next']['href']);
-            $page++;
-        } while ($hasNextPage);
-
-        return $users;
+        return ApiReader::pages($this->client, self::ENDPOINT, 'users', '', ApiReader::MAX_PAGE_SIZE, null);
     }
 
     public function getActive(): array
@@ -54,17 +38,7 @@ final class User
     /** Найти пользователя по ID. Возвращает null, если пользователя нет. */
     public function findById(int $userId): ?array
     {
-        try {
-            $user = $this->request->get(self::ENDPOINT . '/' . $userId);
-        } catch (ApiException $exception) {
-            if ($exception->getCode() === 404) {
-                return null;
-            }
-
-            throw $exception;
-        }
-
-        return $user === [] ? null : $user;
+        return ApiReader::one($this->client, self::ENDPOINT . '/' . $userId);
     }
 
     private function filterByActivity(bool $isActive): array

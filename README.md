@@ -42,7 +42,6 @@ $contacts = $amocrm->contacts()->findByPhone('+7 (999) 000-00-00');
 $contacts = $amocrm->contacts()->findByQuery('Ромашка');
 $contacts = $amocrm->contacts()->findByField(123456, 'ООО Ромашка');
 
-$leads = $amocrm->leads()->findActiveByContactId($contactId);
 $pipelines = $amocrm->pipelines()->find('', 250, null);
 $users = $amocrm->users()->getActive();
 ```
@@ -89,87 +88,37 @@ $amocrm->calls()->createIncoming([
 Первым аргументом методы примечаний, задач, тегов и связей принимают `leads`,
 `contacts` или `companies`.
 
+Удаления сделок в API v4 нет — на `DELETE` amoCRM отвечает 405, чистить
+приходится в интерфейсе.
+
 ## Связи и теги
 
 ```php
 $links = $amocrm->links();
 
 $links->linkContactToLead($contactId, $leadId, true); // true — главный контакт
+$links->linkCompanyToLead($companyId, $leadId);
 $links->unlinkContactFromLead($contactId, $leadId);
 
-$contacts = $links->findContactsForLead($leadId);
 $mainContact = $links->findMainContactForLead($leadId);
-$company = $links->findCompanyForLead($leadId);
+$activeLeads = $links->findActiveLeads('contacts', $contactId); // кроме закрытых
+
+// Чтение отдаёт связи — пары ID и metadata. Сущности грузят их репозитории.
+$contactIds = [];
+
+foreach ($links->findLinks('leads', $leadId) as $link) {
+    if ($link['to_entity_type'] === 'contacts') {
+        $contactIds[] = $link['to_entity_id'];
+    }
+}
+
+$contacts = $amocrm->contacts()->findByIds($contactIds);
 
 $tag = $amocrm->tags()->create('leads', ['name' => 'Важная заявка']);
 $amocrm->tags()->addToEntity('leads', $leadId, [$tag['id'], 'Повторный клиент']);
 $amocrm->tags()->removeFromEntity('leads', $leadId, [$tag['id']]);
 $amocrm->tags()->clearForEntity('leads', $leadId);
 ```
-
-## Товары и списки
-
-Товары — элементы служебного списка с типом `products`, репозиторий находит его
-сам. Цена, артикул и остаток лежат в `custom_fields_values` обычными полями.
-
-```php
-$products = $amocrm->catalogs()->products();
-
-[$product] = $products->create([['name' => 'Стул', 'custom_fields_values' => [
-    ['field_id' => $priceFieldId, 'values' => [['value' => 1500]]],
-]]]);
-$products->update([['id' => $product['id'], 'name' => 'Стул офисный']]);
-
-$products->findByQuery('Стул');
-$products->findById($product['id']);
-$products->find('', 250, null);
-
-// ID полей товара — цены, артикула, остатка.
-$fields = $amocrm->raw()->get('api/v4/catalogs/' . $products->catalogId() . '/custom_fields');
-```
-
-Товар привязывается к сделке с количеством; цену сделки amoCRM пересчитывает
-сама. Второй раз тот же товар в сделке не появится: повторная привязка
-перезаписывает количество, ей же его и меняют.
-
-```php
-$products->linkToLead($leadId, $product['id'], 2);
-$products->linkToLead($leadId, $product['id'], 5); // теперь в сделке 5 штук
-$products->unlinkFromLead($leadId, $product['id']);
-
-$leadProducts = $products->findForLead($leadId);   // сами товары
-$links = $products->findLinksForLead($leadId);     // связи, количество в metadata
-```
-
-Количество может быть дробным. Цену сделки amoCRM пересчитывает не сразу, а
-примерно через секунду после привязки.
-
-Товары сразу многих сделок берут не запросом на каждую сделку, а через
-`with=catalog_elements`: ID товаров и `metadata` с количеством придут прямо в
-сделках, в `_embedded.catalog_elements`.
-
-```php
-$leads = $amocrm->leads()->find('with=catalog_elements&order[id]=desc', 50, 4);
-```
-
-Так же работает любой другой список — счета и пользовательские справочники.
-
-```php
-$catalogs = $amocrm->catalogs();
-
-$all = $catalogs->find('', 250, null);
-$regular = $catalogs->findByType('regular'); // ещё бывают products, invoices, suppliers
-
-$elements = $catalogs->elements($catalogId);
-$elements->create([['name' => 'Строка справочника']]);
-$elements->linkToLead($leadId, $elementId);
-```
-
-Поиска по значению поля у элементов списков нет: `findByField()` бросает
-исключение, вместо него используйте `findByQuery()`.
-
-Удаления товаров, элементов и сделок в API v4 нет — на `DELETE` amoCRM отвечает
-405, чистить приходится в интерфейсе.
 
 ## Произвольные запросы
 
@@ -200,3 +149,29 @@ try {
 Повторных попыток нет: HTTP 429, 5xx и обрыв связи сразу приходят как
 `ApiException`. Повторять ли запрос, решает вызывающий код — запись после обрыва
 могла уже дойти до amoCRM, и повтор завёл бы дубль.
+
+## Разработка
+
+```bash
+composer test       # тесты на фейковой amoCRM, без сети
+composer test-live  # тесты на настоящем аккаунте
+composer cs-check
+```
+
+Живым тестам нужен `.env` в корне проекта (в git он не попадает):
+
+```
+DOMAIN=example.amocrm.ru
+TOKEN=долгосрочный-токен
+TEST_PIPELINE_ID=6725478
+TEST_STATUS_ID=56919066
+```
+
+Без любого из этих значений живые тесты пропускаются. Каждый прогон оставляет в
+аккаунте по одной сделке, контакту и компании с пометкой `[autotest]`: удалить их
+через API нельзя. Сделка создаётся в воронке `TEST_PIPELINE_ID` на этапе
+`TEST_STATUS_ID`, поэтому заводите под них отдельную воронку.
+
+## Лицензия
+
+MIT, см. [LICENSE](LICENSE).

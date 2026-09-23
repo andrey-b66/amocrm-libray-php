@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace Amocrm\Repository;
 
 use Amocrm\Client\ApiClient;
-use Amocrm\Exception\ApiException;
+use Amocrm\Support\ApiReader;
 use InvalidArgumentException;
 
 /**
@@ -17,17 +17,12 @@ use InvalidArgumentException;
  */
 abstract class AbstractApiRepository
 {
-    protected const MAX_PAGE_SIZE = 250;
-
-    protected const MAX_IDS_PER_REQUEST = 25;
+    private const MAX_IDS_PER_REQUEST = 25;
 
     /** Сколько сущностей amoCRM принимает в теле одного запроса на запись. */
-    protected const MAX_BATCH_SIZE = 250;
+    private const MAX_BATCH_SIZE = 250;
 
-    /** Сколько последних цифр номера amoCRM использует при поиске по телефону. */
-    private const PHONE_SEARCH_DIGITS = 10;
-
-    protected ApiClient $request;
+    protected ApiClient $client;
 
     /** Путь API без начального слеша. */
     abstract protected function endpoint(): string;
@@ -37,7 +32,7 @@ abstract class AbstractApiRepository
 
     public function __construct(ApiClient $apiClient)
     {
-        $this->request = $apiClient;
+        $this->client = $apiClient;
     }
 
     /**
@@ -88,11 +83,6 @@ abstract class AbstractApiRepository
      */
     public function create(array $entities): array
     {
-        // Пустой список — создавать нечего.
-        if ($entities === []) {
-            return [];
-        }
-
         foreach ($entities as $index => $entity) {
             // Одну сущность тоже передают списком: create([['name' => 'Иван']]).
             if (!is_array($entity)) {
@@ -110,7 +100,7 @@ abstract class AbstractApiRepository
         // json_encode превратил бы его в объект `{"0":…,"2":…}`, а amoCRM
         // ждёт в теле запроса массив `[…]`.
         foreach (array_chunk($entities, self::MAX_BATCH_SIZE) as $chunk) {
-            $response = $this->request->post($this->endpoint(), $chunk);
+            $response = $this->client->post($this->endpoint(), $chunk);
 
             foreach ($response['_embedded'][$this->embeddedKey()] ?? [] as $entity) {
                 $created[] = $entity;
@@ -127,22 +117,7 @@ abstract class AbstractApiRepository
      */
     public function findById(int $id, string $with = ''): ?array
     {
-        $with = trim($with);
-
-        try {
-            $entity = $this->request->get(
-                $this->endpoint() . '/' . $id,
-                $with === '' ? '' : 'with=' . $with,
-            );
-        } catch (ApiException $exception) {
-            if ($exception->getCode() === 404) {
-                return null;
-            }
-
-            throw $exception;
-        }
-
-        return $entity === [] ? null : $entity;
+        return ApiReader::one($this->client, $this->endpoint() . '/' . $id, self::appendWith('', $with));
     }
 
     /**
@@ -174,55 +149,10 @@ abstract class AbstractApiRepository
      */
     public function find(
         string $query = '',
-        int $limit = self::MAX_PAGE_SIZE,
+        int $limit = ApiReader::MAX_PAGE_SIZE,
         ?int $pages = 1
     ): array {
-        if ($pages !== null && $pages < 1) {
-            throw new InvalidArgumentException(
-                'Читать нужно хотя бы одну страницу, передано: ' . $pages . '.',
-            );
-        }
-
-        $entities = [];
-        $page = 1;
-        $pagesRead = 0;
-
-        while (true) {
-            $response = $this->request->get(
-                $this->endpoint(),
-                $this->buildListQuery($query, $page, $limit),
-            );
-
-            // Коллекция лежит внутри `_embedded` под ключом сущности: leads,
-            // contacts, elements. На пустую выборку amoCRM отвечает 204 без
-            // тела, поэтому `_embedded` в ответе может не оказаться вовсе.
-            $pageEntities = $response['_embedded'][$this->embeddedKey()] ?? [];
-
-            foreach ($pageEntities as $entity) {
-                $entities[] = $entity;
-            }
-
-            $pagesRead++;
-
-            // Страница пришла пустая — читать дальше нечего.
-            if ($pageEntities === []) {
-                break;
-            }
-
-            // Прочитали столько страниц, сколько просили.
-            if ($pages !== null && $pagesRead >= $pages) {
-                break;
-            }
-
-            // amoCRM перестала давать ссылку на следующую страницу.
-            if (!isset($response['_links']['next']['href'])) {
-                break;
-            }
-
-            $page++;
-        }
-
-        return $entities;
+        return ApiReader::pages($this->client, $this->endpoint(), $this->embeddedKey(), $query, $limit, $pages);
     }
 
     /**
@@ -239,12 +169,6 @@ abstract class AbstractApiRepository
     public function findByIds(array $ids, string $with = ''): array
     {
         $ids = array_unique($ids);
-        $with = trim($with);
-
-        if ($ids === []) {
-            return [];
-        }
-
         $entitiesById = [];
 
         foreach (array_chunk($ids, self::MAX_IDS_PER_REQUEST) as $chunk) {
@@ -256,11 +180,7 @@ abstract class AbstractApiRepository
 
             $query .= 'page=1&limit=' . count($chunk);
 
-            if ($with !== '') {
-                $query .= '&with=' . $with;
-            }
-
-            $response = $this->request->get($this->endpoint(), $query);
+            $response = $this->client->get($this->endpoint(), self::appendWith($query, $with));
 
             foreach ($response['_embedded'][$this->embeddedKey()] ?? [] as $entity) {
                 $entityId = $entity['id'] ?? null;
@@ -319,11 +239,6 @@ abstract class AbstractApiRepository
      */
     public function update(array $entities): array
     {
-        // Пустой список — обновлять нечего.
-        if ($entities === []) {
-            return [];
-        }
-
         foreach ($entities as $index => $entity) {
             // Одну сущность тоже передают списком: update([['id' => 15, ...]]).
             if (!is_array($entity)) {
@@ -348,7 +263,7 @@ abstract class AbstractApiRepository
         // json_encode превратил бы его в объект `{"0":…,"2":…}`, а amoCRM
         // ждёт в теле запроса массив `[…]`.
         foreach (array_chunk($entities, self::MAX_BATCH_SIZE) as $chunk) {
-            $response = $this->request->patch($this->endpoint(), $chunk);
+            $response = $this->client->patch($this->endpoint(), $chunk);
 
             foreach ($response['_embedded'][$this->embeddedKey()] ?? [] as $entity) {
                 $updated[] = $entity;
@@ -359,127 +274,18 @@ abstract class AbstractApiRepository
     }
 
     /**
-     * Найти сущности по точному значению пользовательского поля.
+     * Дописать к запросу связанные сущности из `with`, если они заданы.
      *
-     * Всегда возвращается список: amoCRM не гарантирует уникальность значений
-     * пользовательских полей.
-     *
-     * Пример: findByField(123456, 'ООО Ромашка')
-     *
-     * @param int|float|string|bool $fieldValue
+     * Пример: appendWith('page=1', 'contacts') → 'page=1&with=contacts'
      */
-    public function findByField(
-        int $fieldId,
-        $fieldValue,
-        int $limit = self::MAX_PAGE_SIZE,
-        string $with = ''
-    ): array {
-        if (!is_scalar($fieldValue)) {
-            throw new InvalidArgumentException(
-                'Значение поля должно быть числом, строкой или логическим значением.',
-            );
-        }
-
-        if (is_bool($fieldValue)) {
-            $fieldValue = $fieldValue ? '1' : '0';
-        }
-
-        $query = "filter[custom_fields_values][$fieldId][0]=" . urlencode(trim((string) $fieldValue));
+    protected static function appendWith(string $query, string $with): string
+    {
         $with = trim($with);
 
-        if ($with !== '') {
-            $query .= '&with=' . $with;
+        if ($with === '') {
+            return $query;
         }
 
-        return $this->find($query, $limit);
-    }
-
-    /**
-     * Выполнить полнотекстовый поиск по полям сущности.
-     *
-     * Пример: findByQuery('Ромашка', 25)
-     */
-    public function findByQuery(
-        string $query,
-        int $limit = self::MAX_PAGE_SIZE,
-        string $with = ''
-    ): array {
-        return $this->findBySearchString(trim($query), $limit, $with);
-    }
-
-    /**
-     * Выполнить полнотекстовый поиск по последним 10 цифрам номера телефона.
-     *
-     * Пример: findByPhone('+7 (999) 000-00-00')
-     */
-    public function findByPhone(
-        string $phone,
-        int $limit = self::MAX_PAGE_SIZE,
-        string $with = ''
-    ): array {
-        // amoCRM ищет по подстроке цифр, поэтому номер к формату не приводится:
-        // остаются только цифры, из них — последние десять. Так одинаково
-        // ищутся '+7 (999) 000-00-00' и '8 999 000 00 00'. Цифр меньше десяти —
-        // берутся все; нет совсем — поиск пустой, и контакты не ищутся.
-        $digits = preg_replace('/\D+/', '', $phone) ?? '';
-
-        return $this->findBySearchString(
-            substr($digits, -self::PHONE_SEARCH_DIGITS),
-            $limit,
-            $with,
-        );
-    }
-
-    private function findBySearchString(string $search, int $limit, string $with): array
-    {
-        // Пустой поиск вернул бы весь аккаунт — считаем, что не найдено.
-        if ($search === '') {
-            return [];
-        }
-
-        $query = 'query=' . urlencode($search);
-        $with = trim($with);
-
-        if ($with !== '') {
-            $query .= '&with=' . $with;
-        }
-
-        return $this->find($query, $limit);
-    }
-
-    /**
-     * Дополнить запрос пагинацией.
-     *
-     * Принимается как строка параметров, так и вставленный целиком URL — всё до
-     * `?` отбрасывается. `page` и `limit` из строки убираются: их задают
-     * аргументы метода.
-     */
-    protected function buildListQuery(string $query, int $page, int $limit): string
-    {
-        $query = trim($query);
-        $questionMarkPosition = strpos($query, '?');
-
-        if ($questionMarkPosition !== false) {
-            // В PHP 7.4 substr() от позиции за концом строки отдаёт false, а не
-            // пустую строку: так бывает, когда `?` стоит последним символом.
-            $query = (string) substr($query, $questionMarkPosition + 1);
-        }
-
-        $parts = [];
-
-        foreach (explode('&', $query) as $part) {
-            $part = trim($part);
-
-            if ($part === '' || strpos($part, 'page=') === 0 || strpos($part, 'limit=') === 0) {
-                continue;
-            }
-
-            $parts[] = $part;
-        }
-
-        $parts[] = "page=$page";
-        $parts[] = "limit=$limit";
-
-        return implode('&', $parts);
+        return $query === '' ? "with=$with" : "$query&with=$with";
     }
 }

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Amocrm\Repository;
 
 use Amocrm\Client\ApiClient;
+use Amocrm\Exception\ApiException;
 
 /**
  * Репозиторий регистрации звонков в amoCRM.
@@ -19,11 +20,11 @@ final class Call
 
     private const ENDPOINT = 'api/v4/calls';
 
-    private ApiClient $request;
+    private ApiClient $client;
 
     public function __construct(ApiClient $apiClient)
     {
-        $this->request = $apiClient;
+        $this->client = $apiClient;
     }
 
     /**
@@ -44,9 +45,23 @@ final class Call
      */
     public function create(array $data): array
     {
-        $response = $this->request->post(self::ENDPOINT, [$data]);
+        $response = $this->client->post(self::ENDPOINT, [$data]);
+        $call = $response['_embedded']['calls'][0] ?? null;
 
-        return $response['_embedded']['calls'][0] ?? [];
+        if ($call === null) {
+            // Отклонённый звонок amoCRM кладёт в поле `errors`, а HTTP-код
+            // оставляет успешным: так бывает, когда по номеру не нашлось ни
+            // контакта, ни сделки. Без исключения это выглядело бы как успех.
+            throw new ApiException(
+                trim('amoCRM не приняла звонок. ' . self::errorDetail($response)),
+                200,
+                'POST',
+                self::ENDPOINT,
+                $response,
+            );
+        }
+
+        return $call;
     }
 
     /** То же, что create(), но `direction` проставляется сам. */
@@ -62,5 +77,23 @@ final class Call
         $data['direction'] = self::DIRECTION_OUTBOUND;
 
         return $this->create($data);
+    }
+
+    /** Достать пояснение из поля `errors` ответа amoCRM. */
+    private static function errorDetail(array $response): string
+    {
+        foreach ($response['errors'] ?? [] as $error) {
+            foreach ($error['errors'] ?? [] as $reason) {
+                if (is_string($reason['detail'] ?? null)) {
+                    return $reason['detail'];
+                }
+            }
+
+            if (is_string($error['detail'] ?? null)) {
+                return $error['detail'];
+            }
+        }
+
+        return '';
     }
 }

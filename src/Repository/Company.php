@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace Amocrm\Repository;
 
 /** Репозиторий компаний amoCRM. */
-final class Company extends AbstractApiRepository
+final class Company extends AbstractSearchableRepository
 {
     protected function endpoint(): string
     {

@@ -25,13 +25,17 @@ use RuntimeException;
  */
 final class ApiClient
 {
-    /** Сколько ждать ответа целиком, в секундах. */
-    private const TIMEOUT = 30;
+    /** Сколько ждать ответа целиком, в секундах, если не задано иное. */
+    public const DEFAULT_TIMEOUT = 30;
 
-    /** Сколько ждать соединения с amoCRM, в секундах. */
-    private const CONNECT_TIMEOUT = 10;
+    /** Сколько ждать соединения с amoCRM, в секундах, если не задано иное. */
+    public const DEFAULT_CONNECT_TIMEOUT = 10;
 
     private string $baseUrl;
+
+    private int $timeout;
+
+    private int $connectTimeout;
 
     /** @var string[] */
     private array $headers;
@@ -44,8 +48,16 @@ final class ApiClient
      */
     private $curl;
 
-    public function __construct(string $domain, string $longLivedToken)
-    {
+    /**
+     * Таймауты задают, сколько ждать ответа целиком и сколько — соединения.
+     * Их поднимают для тяжёлых выгрузок и медленных каналов.
+     */
+    public function __construct(
+        string $domain,
+        string $longLivedToken,
+        int $timeout = self::DEFAULT_TIMEOUT,
+        int $connectTimeout = self::DEFAULT_CONNECT_TIMEOUT
+    ) {
         $domain = strtolower(trim($domain));
         $domain = preg_replace('#^https?://#', '', $domain) ?? $domain;
         $domain = trim($domain, '/');
@@ -59,6 +71,11 @@ final class ApiClient
             throw new InvalidArgumentException('Долгосрочный токен amoCRM не должен быть пустым.');
         }
 
+        // Ноль для cURL означает «ждать без конца», поэтому он не допускается.
+        if ($timeout < 1 || $connectTimeout < 1) {
+            throw new InvalidArgumentException('Таймауты должны быть положительными, в секундах.');
+        }
+
         $curl = curl_init();
 
         if ($curl === false) {
@@ -66,6 +83,8 @@ final class ApiClient
         }
 
         $this->baseUrl = "https://$domain/";
+        $this->timeout = $timeout;
+        $this->connectTimeout = $connectTimeout;
         $this->curl = $curl;
         $this->headers = [
             'Authorization: Bearer ' . $token,
@@ -107,8 +126,8 @@ final class ApiClient
             CURLOPT_CUSTOMREQUEST => $method,
             CURLOPT_HTTPHEADER => $this->headers,
             CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_TIMEOUT => self::TIMEOUT,
-            CURLOPT_CONNECTTIMEOUT => self::CONNECT_TIMEOUT,
+            CURLOPT_TIMEOUT => $this->timeout,
+            CURLOPT_CONNECTTIMEOUT => $this->connectTimeout,
             // Пустая строка — принять любое сжатие, которое умеет cURL.
             CURLOPT_ENCODING => '',
         ];
@@ -224,8 +243,13 @@ final class ApiClient
             case 401:
                 $message = 'Долгосрочный токен amoCRM недействителен или отозван.';
                 break;
+            case 402:
+                $message = 'Аккаунт amoCRM не оплачен или возможность не входит в тариф.';
+                break;
             case 403:
-                $message = 'Недостаточно прав для выполнения запроса к amoCRM.';
+                // Тем же кодом amoCRM отвечает на блокировку аккаунта за
+                // повторное превышение лимита запросов и на фильтр по IP.
+                $message = 'amoCRM отклонила запрос: недостаточно прав или аккаунт заблокирован.';
                 break;
             case 404:
                 $message = 'Запрошенный ресурс amoCRM не найден.';
