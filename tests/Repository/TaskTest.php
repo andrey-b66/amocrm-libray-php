@@ -8,6 +8,7 @@ use Amocrm\Repository\Task;
 use Amocrm\Tests\Fake\FakeAmocrmTestCase;
 use InvalidArgumentException;
 
+/** Задачи, привязанные к сущностям. */
 final class TaskTest extends FakeAmocrmTestCase
 {
     public function testCreateForEntityAttachesTask(): void

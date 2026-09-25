@@ -8,6 +8,7 @@ use Amocrm\Support\EntityType;
 use InvalidArgumentException;
 use PHPUnit\Framework\TestCase;
 
+/** Проверка типа сущности: только `contacts`, `leads` и `companies`, строго. */
 final class EntityTypeTest extends TestCase
 {
     /** @dataProvider supportedTypes */

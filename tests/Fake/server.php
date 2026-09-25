@@ -44,4 +44,9 @@ if ($response === null) {
 }
 
 http_response_code($response['status']);
+
+foreach ($response['headers'] ?? [] as $name => $value) {
+    header("$name: $value");
+}
+
 echo $response['body'];

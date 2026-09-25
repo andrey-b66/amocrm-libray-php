@@ -18,13 +18,7 @@ final class ApiReader
     /** Больше 250 сущностей за один запрос amoCRM не отдаёт. */
     public const MAX_PAGE_SIZE = 250;
 
-    /**
-     * Получить одну сущность или null, если её нет.
-     *
-     * Отсутствующие сделку, контакт или примечание amoCRM отдаёт как HTTP 204
-     * без тела, а отсутствующего пользователя — как 404: оба ответа значат
-     * «не найдено».
-     */
+    /** Получить одну сущность; null, если её нет — на это amoCRM отвечает 204 или 404. */
     public static function one(ApiClient $client, string $endpoint, string $query = ''): ?array
     {
         try {
@@ -41,16 +35,10 @@ final class ApiReader
     }
 
     /**
-     * Прочитать коллекцию — одну страницу, несколько или все.
+     * Прочитать коллекцию — одну страницу, несколько или все; правила запроса
+     * описаны у AbstractApiRepository::find().
      *
-     * Запрос принимается строкой параметров или целым URL — всё до `?`
-     * отбрасывается. `page` и `limit` из строки убираются: их задают аргументы.
-     *
-     * Сколько читать, задаёт `$pages`: число — столько страниц, `null` — до
-     * конца выборки. Обход в любом случае останавливается на пустой странице
-     * или когда amoCRM перестаёт отдавать ссылку `_links.next`.
-     *
-     * @param int|null $pages сколько страниц прочитать; null — все до конца выборки
+     * @param int|null $pages сколько страниц прочитать; null — все
      */
     public static function pages(
         ApiClient $client,
@@ -77,25 +65,29 @@ final class ApiReader
                 $entities[] = $entity;
             }
 
-            // Страница пришла пустая — читать дальше нечего.
-            if ($pageEntities === []) {
-                break;
-            }
-
-            // Прочитали столько страниц, сколько просили.
-            if ($pages !== null && $page >= $pages) {
-                break;
-            }
-
-            // amoCRM перестала давать ссылку на следующую страницу.
-            if (!isset($response['_links']['next']['href'])) {
-                break;
+            // Хватит: страница пустая, прочитано сколько просили или amoCRM не дала ссылку дальше.
+            if ($pageEntities === [] || $page === $pages || !isset($response['_links']['next']['href'])) {
+                return $entities;
             }
 
             $page++;
         }
+    }
 
-        return $entities;
+    /**
+     * Дописать к запросу связанные сущности из `with`, если они заданы.
+     *
+     * Пример: appendWith('page=1', 'contacts') → 'page=1&with=contacts'
+     */
+    public static function appendWith(string $query, string $with): string
+    {
+        $with = trim($with);
+
+        if ($with === '') {
+            return $query;
+        }
+
+        return $query === '' ? "with=$with" : "$query&with=$with";
     }
 
     /** Дополнить запрос пагинацией, выбросив из него адрес и прежние `page` и `limit`. */
@@ -126,6 +118,7 @@ final class ApiReader
         return implode('&', $parts);
     }
 
+    /** Экземпляры не нужны: у класса только статические методы. */
     private function __construct()
     {
     }

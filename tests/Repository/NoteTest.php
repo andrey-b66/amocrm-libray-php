@@ -8,41 +8,67 @@ use Amocrm\Repository\Note;
 use Amocrm\Tests\Fake\FakeAmocrmTestCase;
 use InvalidArgumentException;
 
+/** Примечания контактов, сделок и компаний. */
 final class NoteTest extends FakeAmocrmTestCase
 {
-    public function testCreateAttachesNoteToEntity(): void
+    public function testCreateSendsListAndReturnsCreatedNotes(): void
     {
-        $this->respond(['_embedded' => ['notes' => [['id' => 77]]]]);
+        $this->respond(self::page('notes', [
+            ['id' => 77, 'entity_id' => 10, 'request_id' => 'a'],
+            ['id' => 78, 'entity_id' => 11, 'request_id' => 'b'],
+        ]));
 
-        $note = $this->notes()->create('leads', 10, [
-            'note_type' => 'call_in',
-            'params' => ['uniq' => 'call-1', 'duration' => 60],
-        ]);
+        $notes = [
+            ['entity_id' => 10, 'note_type' => 'common', 'params' => ['text' => 'Текст'], 'request_id' => 'a'],
+            ['entity_id' => 11, 'note_type' => 'call_in', 'params' => ['uniq' => 'call-1', 'duration' => 60], 'request_id' => 'b'],
+        ];
 
-        self::assertSame(['id' => 77], $note);
+        self::assertSame([
+            ['id' => 77, 'entity_id' => 10, 'request_id' => 'a'],
+            ['id' => 78, 'entity_id' => 11, 'request_id' => 'b'],
+        ], $this->notes()->create('leads', $notes));
         self::assertSame(['POST /api/v4/leads/notes'], $this->requestLog());
-        self::assertSame([[
-            'note_type' => 'call_in',
-            'params' => ['uniq' => 'call-1', 'duration' => 60],
-            'entity_id' => 10,
-        ]], $this->lastRequest()['body']);
+        self::assertSame($notes, $this->lastRequest()['body']);
     }
 
-    public function testCreateCommonTrimsText(): void
+    public function testCreateSplitsIntoBatchesOf250(): void
     {
-        $this->respond(['_embedded' => ['notes' => [['id' => 77]]]]);
+        $this->respond(self::page('notes', [['id' => 1]]));
+        $this->respond(self::page('notes', [['id' => 2]]));
 
-        $this->notes()->createCommon('contacts', 5, '  Клиент просил перезвонить  ');
+        $notes = array_fill(0, 251, ['entity_id' => 10, 'note_type' => 'common', 'params' => ['text' => 'Текст']]);
 
+        self::assertSame([['id' => 1], ['id' => 2]], $this->notes()->create('contacts', $notes));
+        self::assertCount(250, $this->requests()[0]['body']);
+        self::assertCount(1, $this->requests()[1]['body']);
+    }
+
+    public function testCreateRejectsSingleNoteInsteadOfList(): void
+    {
+        $exception = self::exceptionFrom(
+            fn () => $this->notes()->create('leads', ['entity_id' => 10, 'note_type' => 'common']),
+        );
+
+        self::assertInstanceOf(InvalidArgumentException::class, $exception);
+        self::assertSame([], $this->requests());
+    }
+
+    public function testCreateCommonTrimsTextAndReturnsOneNote(): void
+    {
+        $this->respond(self::page('notes', [['id' => 77, 'entity_id' => 5]]));
+
+        $note = $this->notes()->createCommon('contacts', 5, '  Клиент просил перезвонить  ');
+
+        self::assertSame(['id' => 77, 'entity_id' => 5], $note);
         self::assertSame(['POST /api/v4/contacts/notes'], $this->requestLog());
         self::assertSame([[
+            'entity_id' => 5,
             'note_type' => 'common',
             'params' => ['text' => 'Клиент просил перезвонить'],
-            'entity_id' => 5,
         ]], $this->lastRequest()['body']);
     }
 
-    public function testCreateReturnsEmptyArrayWhenResponseHasNoNote(): void
+    public function testCreateCommonReturnsEmptyArrayWhenResponseHasNoNote(): void
     {
         $this->respond([]);
 
@@ -107,15 +133,26 @@ final class NoteTest extends FakeAmocrmTestCase
         self::assertNull($this->notes()->findById('leads', 10, 77));
     }
 
-    public function testUpdate(): void
+    public function testUpdateSendsListAndReturnsUpdatedNotes(): void
     {
-        $this->respond(['id' => 77, 'updated_at' => 1700000000]);
+        $this->respond(self::page('notes', [['id' => 77, 'updated_at' => 1700000000]]));
 
-        $result = $this->notes()->update('leads', 10, 77, ['params' => ['text' => 'Новый текст']]);
+        $notes = [['id' => 77, 'entity_id' => 10, 'note_type' => 'common', 'params' => ['text' => 'Новый текст']]];
 
-        self::assertSame(['id' => 77, 'updated_at' => 1700000000], $result);
-        self::assertSame(['PATCH /api/v4/leads/10/notes/77'], $this->requestLog());
-        self::assertSame(['params' => ['text' => 'Новый текст']], $this->lastRequest()['body']);
+        self::assertSame([['id' => 77, 'updated_at' => 1700000000]], $this->notes()->update('leads', $notes));
+        self::assertSame(['PATCH /api/v4/leads/notes'], $this->requestLog());
+        self::assertSame($notes, $this->lastRequest()['body']);
+    }
+
+    public function testUpdateRejectsNoteWithoutId(): void
+    {
+        $exception = self::exceptionFrom(
+            fn () => $this->notes()->update('leads', [['note_type' => 'common', 'params' => ['text' => 'Текст']]]),
+        );
+
+        self::assertInstanceOf(InvalidArgumentException::class, $exception);
+        self::assertStringContainsString('В сущности 0', $exception->getMessage());
+        self::assertSame([], $this->requests());
     }
 
     public function testRejectsUnsupportedEntityType(): void

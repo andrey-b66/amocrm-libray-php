@@ -6,6 +6,7 @@ namespace Amocrm\Repository;
 
 use Amocrm\Client\ApiClient;
 use Amocrm\Support\ApiReader;
+use Amocrm\Support\ApiWriter;
 use Amocrm\Support\EntityType;
 
 /**
@@ -17,49 +18,45 @@ final class Note
 {
     private ApiClient $client;
 
+    /** Обычно репозиторий берут у фасада: $amocrm->notes(). */
     public function __construct(ApiClient $apiClient)
     {
         $this->client = $apiClient;
     }
 
     /**
-     * Создать примечание любого типа по данным формата amoCRM API v4.
+     * Создать примечания: принимает список и возвращает список. У каждого —
+     * `entity_id`, `note_type` и `params`; порции по 250, как у create() репозиториев.
      *
-     * Пример: create('leads', $leadId, [
-     *     'note_type' => 'call_in',
-     *     'params' => ['uniq' => 'call-2026-0001', 'duration' => 60, 'phone' => '+79990000000'],
-     * ])
+     * Пример: create('leads', [['entity_id' => $leadId, 'note_type' => 'common', 'params' => ['text' => 'Перезвонить']]])
      */
-    public function create(string $entityType, int $entityId, array $data): array
+    public function create(string $entityType, array $notes): array
     {
         $entityType = EntityType::validate($entityType);
-        $data['entity_id'] = $entityId;
 
-        $response = $this->client->post("api/v4/$entityType/notes", [$data]);
-
-        return $response['_embedded']['notes'][0] ?? [];
+        return ApiWriter::write($this->client, 'post', "api/v4/$entityType/notes", 'notes', $notes);
     }
 
     /**
-     * Создать обычное текстовое примечание.
+     * Создать одно текстовое примечание и вернуть его.
      *
      * Пример: createCommon('leads', $leadId, 'Клиент просил перезвонить')
      */
     public function createCommon(string $entityType, int $entityId, string $text): array
     {
-        return $this->create($entityType, $entityId, [
+        return $this->create($entityType, [[
+            'entity_id' => $entityId,
             'note_type' => 'common',
             'params' => ['text' => trim($text)],
-        ]);
+        ]])[0] ?? [];
     }
 
     /**
-     * Получить примечания конкретной сущности — одну страницу, несколько или все.
+     * Получить примечания сущности: по умолчанию первую страницу (до 250), с $pages = null — все.
      *
-     * Запрос и страницы задаются так же, как в find() у репозиториев.
+     * Пример: findForEntity('leads', $leadId, 'filter[note_type][0]=common', 250, null)
      *
-     * Пример: findForEntity('leads', $leadId, 'filter[note_type][0]=common')
-     * Пример: findForEntity('leads', $leadId, '', 250, null) — все примечания сущности
+     * @param int|null $pages сколько страниц прочитать; null — все
      */
     public function findForEntity(
         string $entityType,
@@ -73,7 +70,7 @@ final class Note
         return ApiReader::pages($this->client, "api/v4/$entityType/$entityId/notes", 'notes', $query, $limit, $pages);
     }
 
-    /** Найти примечание по ID. Возвращает null, если примечания нет. */
+    /** Найти примечание по ID; null, если примечания нет. */
     public function findById(string $entityType, int $entityId, int $noteId): ?array
     {
         $entityType = EntityType::validate($entityType);
@@ -81,15 +78,16 @@ final class Note
         return ApiReader::one($this->client, "api/v4/$entityType/$entityId/notes/$noteId");
     }
 
-    /** Обновить примечание частичными данными формата amoCRM API v4. */
-    public function update(
-        string $entityType,
-        int $entityId,
-        int $noteId,
-        array $data
-    ): array {
+    /**
+     * Обновить примечания: принимает список и возвращает список. amoCRM требует
+     * у каждого `id`, `entity_id`, `note_type` и `params`.
+     *
+     * Пример: update('leads', [['id' => $noteId, 'entity_id' => $leadId, 'note_type' => 'common', 'params' => ['text' => 'Новый']]])
+     */
+    public function update(string $entityType, array $notes): array
+    {
         $entityType = EntityType::validate($entityType);
 
-        return $this->client->patch("api/v4/$entityType/$entityId/notes/$noteId", $data);
+        return ApiWriter::write($this->client, 'patch', "api/v4/$entityType/notes", 'notes', $notes);
     }
 }

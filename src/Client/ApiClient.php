@@ -11,47 +11,53 @@ use RuntimeException;
 /**
  * HTTP-клиент amoCRM API v4 поверх cURL.
  *
- * Никаких настроек: домен и долгосрочный токен — всё, что нужно. Ответ
- * возвращается обычным массивом, любая ошибка приходит как ApiException.
- *
- * Упавший запрос не повторяется: HTTP 429, 5xx и обрыв связи приходят
- * вызывающему коду как ApiException. Только он знает, можно ли отправить
- * запись заново и не завести при этом дубль.
- *
- * Запросы уходят по одному, в том порядке, в каком их сделал вызывающий код.
+ * Возвращает разобранный ответ массивом, любую ошибку бросает как ApiException.
+ * Запросы не повторяются: повторять ли запись после сбоя, решает вызывающий код.
  *
  * Пример: $amocrm->raw()->get('api/v4/events', 'filter[entity][0]=lead&limit=50')
  * Пример: $amocrm->raw()->patch('api/v4/leads/' . $leadId, ['price' => 1000])
  */
 final class ApiClient
 {
-    /** Сколько ждать ответа целиком, в секундах, если не задано иное. */
+    /** Сколько ждать ответа целиком по умолчанию, в секундах. */
     public const DEFAULT_TIMEOUT = 30;
 
-    /** Сколько ждать соединения с amoCRM, в секундах, если не задано иное. */
+    /** Сколько ждать соединения по умолчанию, в секундах. */
     public const DEFAULT_CONNECT_TIMEOUT = 10;
 
+    /** Текст ошибки по HTTP-коду; остальные коды описывает errorMessage(). */
+    private const ERROR_MESSAGES = [
+        400 => 'amoCRM отклонила данные запроса.',
+        401 => 'Токен amoCRM истёк, недействителен или отозван.',
+        402 => 'Аккаунт amoCRM не оплачен или возможность не входит в тариф.',
+        403 => 'amoCRM отклонила запрос: недостаточно прав или аккаунт заблокирован.',
+        404 => 'Запрошенный ресурс amoCRM не найден.',
+        429 => 'Превышен лимит запросов к amoCRM.',
+    ];
+
+    /** Адрес аккаунта со слешем на конце: `https://example.amocrm.ru/`. */
     private string $baseUrl;
 
+    /** Сколько ждать ответа целиком, в секундах. */
     private int $timeout;
 
+    /** Сколько ждать соединения, в секундах. */
     private int $connectTimeout;
 
-    /** @var string[] */
+    /** @var string[] заголовки каждого запроса */
     private array $headers;
 
+    /** Заголовок `X-Request-Id` последнего ответа; пустая строка, если его не было. */
+    private string $lastRequestId = '';
+
     /**
-     * Одно соединение на клиент: запросы подряд, например обход страниц,
-     * не открывают TLS-соединение с amoCRM каждый раз заново.
+     * Один хэндл на клиент: запросы подряд не открывают соединение заново.
      *
      * @var resource|\CurlHandle
      */
     private $curl;
 
-    /**
-     * Таймауты задают, сколько ждать ответа целиком и сколько — соединения.
-     * Их поднимают для тяжёлых выгрузок и медленных каналов.
-     */
+    /** Домен — в любом виде: со схемой, слешем, в любом регистре. Таймауты — в секундах. */
     public function __construct(
         string $domain,
         string $longLivedToken,
@@ -71,7 +77,7 @@ final class ApiClient
             throw new InvalidArgumentException('Долгосрочный токен amoCRM не должен быть пустым.');
         }
 
-        // Ноль для cURL означает «ждать без конца», поэтому он не допускается.
+        // Ноль для cURL значит «ждать без конца».
         if ($timeout < 1 || $connectTimeout < 1) {
             throw new InvalidArgumentException('Таймауты должны быть положительными, в секундах.');
         }
@@ -94,33 +100,35 @@ final class ApiClient
         ];
     }
 
+    /** GET-запрос. $query — строка параметров, как в адресной строке браузера. */
     public function get(string $endpoint, string $query = ''): array
     {
         return $this->send('GET', $endpoint, [], $query);
     }
 
-    public function post(string $endpoint, array $data = [], string $query = ''): array
+    /** POST-запрос: $data уходит телом в JSON. */
+    public function post(string $endpoint, array $data = []): array
     {
-        return $this->send('POST', $endpoint, $data, $query);
+        return $this->send('POST', $endpoint, $data, '');
     }
 
-    public function patch(string $endpoint, array $data = [], string $query = ''): array
+    /** PATCH-запрос: $data уходит телом в JSON. */
+    public function patch(string $endpoint, array $data = []): array
     {
-        return $this->send('PATCH', $endpoint, $data, $query);
+        return $this->send('PATCH', $endpoint, $data, '');
     }
 
-    public function put(string $endpoint, array $data = [], string $query = ''): array
+    /** ID последнего запроса из заголовка `X-Request-Id`, например для логов; пустая строка, если его не было. */
+    public function lastRequestId(): string
     {
-        return $this->send('PUT', $endpoint, $data, $query);
+        return $this->lastRequestId;
     }
 
-    /**
-     * Выполнить запрос и вернуть разобранный ответ amoCRM.
-     *
-     * $query — обычная строка параметров, как в адресной строке браузера.
-     */
+    /** Выполнить запрос и вернуть разобранный ответ amoCRM. */
     private function send(string $method, string $endpoint, array $data, string $query): array
     {
+        $requestId = '';
+
         $options = [
             CURLOPT_URL => $this->buildUrl($endpoint, $query),
             CURLOPT_CUSTOMREQUEST => $method,
@@ -130,24 +138,36 @@ final class ApiClient
             CURLOPT_CONNECTTIMEOUT => $this->connectTimeout,
             // Пустая строка — принять любое сжатие, которое умеет cURL.
             CURLOPT_ENCODING => '',
+            // Статическое замыкание, чтобы хэндл не держал ссылку на клиент.
+            CURLOPT_HEADERFUNCTION => static function ($curl, string $line) use (&$requestId): int {
+                if (stripos($line, 'X-Request-Id:') === 0) {
+                    $requestId = trim(substr($line, strlen('X-Request-Id:')));
+                }
+
+                return strlen($line);
+            },
         ];
 
-        // Тело у записи отправляется всегда, даже пустое: без Content-Length
-        // часть серверов отвечает на POST и PUT ошибкой 411.
+        // Тело шлётся и пустым: без Content-Length часть серверов отвечает 411.
         if ($method !== 'GET') {
             $options[CURLOPT_POSTFIELDS] = $this->encodeBody($data, $method, $endpoint);
         }
 
-        // Настройки прошлого запроса сбрасываются, живое соединение остаётся.
+        // Настройки прошлого запроса сбрасываются, соединение остаётся.
         curl_reset($this->curl);
         curl_setopt_array($this->curl, $options);
 
         $response = curl_exec($this->curl);
+        $this->lastRequestId = $requestId;
 
         if ($response === false) {
-            // Запрос не дошёл до amoCRM: обрыв связи, таймаут, неизвестный домен.
+            // Код cURL пишется всегда: описание бывает пустым.
+            $error = curl_error($this->curl);
+
             throw new ApiException(
-                'Не удалось выполнить запрос к amoCRM. ' . curl_error($this->curl),
+                'Не удалось выполнить запрос к amoCRM. '
+                . ($error === '' ? 'Причина неизвестна.' : $error)
+                . ' Код cURL: ' . curl_errno($this->curl) . '.',
                 0,
                 $method,
                 $endpoint,
@@ -193,13 +213,7 @@ final class ApiClient
         return $url . '?' . self::encodeQuery($query);
     }
 
-    /**
-     * Закодировать строку параметров для адреса запроса.
-     *
-     * Строка пишется как есть: пробелы, кириллица и квадратные скобки
-     * кодируются здесь, а уже закодированное (`%D0%9E`) второй раз не
-     * трогается. amoCRM понимает оба вида.
-     */
+    /** Закодировать пробелы, кириллицу и скобки в строке параметров; уже закодированное не трогать. */
     private static function encodeQuery(string $query): string
     {
         $encoded = preg_replace_callback(
@@ -211,7 +225,7 @@ final class ApiClient
         return $encoded ?? $query;
     }
 
-    /** Разобрать ответ amoCRM или бросить ApiException. */
+    /** Разобрать ответ amoCRM или бросить ApiException; HTTP 204 — пустой ответ, не ошибка. */
     private function parseResponse(int $statusCode, string $body, string $method, string $endpoint): array
     {
         $responseData = json_decode($body, true);
@@ -220,7 +234,6 @@ final class ApiClient
             $responseData = [];
         }
 
-        // HTTP 204 «нет содержимого» — не ошибка, просто пустой ответ.
         if ($statusCode >= 200 && $statusCode < 300) {
             return $responseData;
         }
@@ -231,37 +244,15 @@ final class ApiClient
             $method,
             $endpoint,
             $responseData,
+            $this->lastRequestId,
         );
     }
 
+    /** Текст ошибки по HTTP-коду, дополненный пояснением `detail` из ответа amoCRM. */
     private function errorMessage(int $statusCode, array $responseData): string
     {
-        switch ($statusCode) {
-            case 400:
-                $message = 'amoCRM отклонила данные запроса.';
-                break;
-            case 401:
-                $message = 'Долгосрочный токен amoCRM недействителен или отозван.';
-                break;
-            case 402:
-                $message = 'Аккаунт amoCRM не оплачен или возможность не входит в тариф.';
-                break;
-            case 403:
-                // Тем же кодом amoCRM отвечает на блокировку аккаунта за
-                // повторное превышение лимита запросов и на фильтр по IP.
-                $message = 'amoCRM отклонила запрос: недостаточно прав или аккаунт заблокирован.';
-                break;
-            case 404:
-                $message = 'Запрошенный ресурс amoCRM не найден.';
-                break;
-            case 429:
-                $message = 'Превышен лимит запросов к amoCRM.';
-                break;
-            default:
-                $message = $statusCode >= 500
-                    ? 'Сервис amoCRM временно недоступен.'
-                    : "amoCRM вернула HTTP-ошибку $statusCode.";
-        }
+        $message = self::ERROR_MESSAGES[$statusCode]
+            ?? ($statusCode >= 500 ? 'Сервис amoCRM временно недоступен.' : "amoCRM вернула HTTP-ошибку $statusCode.");
 
         $detail = $responseData['detail'] ?? null;
 

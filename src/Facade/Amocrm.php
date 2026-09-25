@@ -17,17 +17,15 @@ use Amocrm\Repository\Task;
 use Amocrm\Repository\User;
 
 /**
- * Единая точка входа для работы с amoCRM.
- *
- * Фасад создаёт API-клиент с долгосрочным токеном и по требованию возвращает
- * репозитории, использующие один и тот же авторизованный клиент. Репозитории
- * принимают и возвращают обычные массивы формата amoCRM API v4.
+ * Точка входа: создаёт API-клиент по долгосрочному токену и отдаёт репозитории.
+ * Репозитории принимают и возвращают массивы формата amoCRM API v4.
  *
  * Пример: $amocrm = new Amocrm('example.amocrm.ru', $longLivedToken);
- *         $leads = $amocrm->leads()->find('filter[status_id][0]=143', 250, null);
+ *         $leads = $amocrm->leads()->find('filter[pipeline_id][0]=10739150', 250, null);
  */
 final class Amocrm
 {
+    /** Один клиент на все репозитории: у них общее соединение. */
     private ApiClient $apiClient;
 
     /** Таймауты в секундах: сколько ждать ответа целиком и сколько — соединения. */
@@ -100,7 +98,7 @@ final class Amocrm
         return new Tag($this->apiClient);
     }
 
-    /** Получить низкоуровневый доступ к amoCRM API v4: get/post/patch/put. */
+    /** Получить API-клиент для запросов, которых нет в репозиториях. */
     public function raw(): ApiClient
     {
         return $this->apiClient;

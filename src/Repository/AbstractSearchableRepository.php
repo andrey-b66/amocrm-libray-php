@@ -7,24 +7,15 @@ namespace Amocrm\Repository;
 use Amocrm\Support\ApiReader;
 use InvalidArgumentException;
 
-/**
- * Репозиторий сущностей с поиском: контакты, компании и сделки.
- *
- * Полнотекстовый `query` и фильтр по пользовательским полям amoCRM понимает
- * только у них. Незнакомый параметр она не отклоняет, а молча отдаёт всю
- * выборку, поэтому у задач и воронок поиска нет вовсе: иначе он вернул бы
- * не найденное, а первые попавшиеся записи.
- */
+/** Репозиторий с поиском по тексту, телефону и полям: контакты, компании и сделки. */
 abstract class AbstractSearchableRepository extends AbstractApiRepository
 {
     /** Сколько последних цифр номера amoCRM использует при поиске по телефону. */
     private const PHONE_SEARCH_DIGITS = 10;
 
     /**
-     * Найти сущности по точному значению пользовательского поля.
-     *
-     * Всегда возвращается список: amoCRM не гарантирует уникальность значений
-     * пользовательских полей.
+     * Найти сущности по точному значению пользовательского поля. Нужна подключённая
+     * в аккаунте API-фильтрация, иначе amoCRM отвечает HTTP 400.
      *
      * Пример: findByField(123456, 'ООО Ромашка')
      *
@@ -42,17 +33,18 @@ abstract class AbstractSearchableRepository extends AbstractApiRepository
             );
         }
 
+        // (string) false — пустая строка, поэтому логическое значение уходит как 1 или 0.
         if (is_bool($fieldValue)) {
-            $fieldValue = $fieldValue ? '1' : '0';
+            $fieldValue = (int) $fieldValue;
         }
 
         $query = "filter[custom_fields_values][$fieldId][0]=" . urlencode(trim((string) $fieldValue));
 
-        return $this->find(self::appendWith($query, $with), $limit);
+        return $this->find(ApiReader::appendWith($query, $with), $limit);
     }
 
     /**
-     * Выполнить полнотекстовый поиск по полям сущности.
+     * Полнотекстовый поиск по полям сущности; пустая строка возвращает пустой список.
      *
      * Пример: findByQuery('Ромашка', 25)
      */
@@ -61,12 +53,17 @@ abstract class AbstractSearchableRepository extends AbstractApiRepository
         int $limit = ApiReader::MAX_PAGE_SIZE,
         string $with = ''
     ): array {
-        return $this->findBySearchString(trim($query), $limit, $with);
+        $query = trim($query);
+
+        if ($query === '') {
+            return [];
+        }
+
+        return $this->find(ApiReader::appendWith('query=' . urlencode($query), $with), $limit);
     }
 
     /**
-     * Выполнить полнотекстовый поиск по последним 10 цифрам номера телефона.
-     * Цифр меньше десяти — берутся все; нет совсем — поиск пустой, и запрос не отправляется.
+     * Поиск по телефону в любом формате — по последним 10 цифрам номера.
      *
      * Пример: findByPhone('+7 (999) 000-00-00')
      */
@@ -77,20 +74,6 @@ abstract class AbstractSearchableRepository extends AbstractApiRepository
     ): array {
         $digits = preg_replace('/\D+/', '', $phone) ?? '';
 
-        return $this->findBySearchString(
-            substr($digits, -self::PHONE_SEARCH_DIGITS),
-            $limit,
-            $with,
-        );
-    }
-
-    private function findBySearchString(string $search, int $limit, string $with): array
-    {
-        // Пустой поиск вернул бы весь аккаунт — считаем, что не найдено.
-        if ($search === '') {
-            return [];
-        }
-
-        return $this->find(self::appendWith('query=' . urlencode($search), $with), $limit);
+        return $this->findByQuery(substr($digits, -self::PHONE_SEARCH_DIGITS), $limit, $with);
     }
 }

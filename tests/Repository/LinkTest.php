@@ -8,6 +8,7 @@ use Amocrm\Repository\Link;
 use Amocrm\Tests\Fake\FakeAmocrmTestCase;
 use InvalidArgumentException;
 
+/** Привязка, отвязка и чтение связей между сущностями. */
 final class LinkTest extends FakeAmocrmTestCase
 {
     /** @dataProvider linkCalls */
@@ -84,130 +85,80 @@ final class LinkTest extends FakeAmocrmTestCase
         ];
     }
 
-    /**
-     * Фильтры в запрос не кладутся: по одному типу amoCRM их игнорирует и
-     * всё равно отдаёт все связи — так она отвечает и на живом аккаунте.
-     */
-    public function testFindLinksReadsAllLinksWithoutFilters(): void
+    /** Фильтров в запросе нет: amoCRM их пропускает и отдаёт все связи, как на живом аккаунте. */
+    public function testFindLinkedIdsKeepsOnlyRequestedTypeInLinkOrder(): void
     {
-        $links = [
-            ['to_entity_id' => 5, 'to_entity_type' => 'contacts', 'metadata' => ['main_contact' => true]],
+        $this->respond(['_embedded' => ['links' => [
+            ['to_entity_id' => 6, 'to_entity_type' => 'contacts'],
             ['to_entity_id' => 7, 'to_entity_type' => 'companies'],
-        ];
-        $this->respond(['_embedded' => ['links' => $links]]);
+            ['to_entity_id' => 5, 'to_entity_type' => 'contacts'],
+        ]]]);
 
-        self::assertSame($links, $this->links()->findLinks('leads', 10));
+        self::assertSame([6, 5], $this->links()->findLinkedIds('leads', 10, 'contacts'));
         self::assertSame(['GET /api/v4/leads/10/links'], $this->requestLog());
     }
 
-    public function testFindLinksReturnsEmptyListOnNoContent(): void
+    public function testFindLinkedIdsWithoutSuchLinks(): void
+    {
+        $this->respond(['_embedded' => ['links' => [['to_entity_id' => 7, 'to_entity_type' => 'companies']]]]);
+
+        self::assertSame([], $this->links()->findLinkedIds('leads', 10, 'contacts'));
+    }
+
+    public function testFindLinkedIdsReturnsEmptyListOnNoContent(): void
     {
         $this->respondNoContent();
 
-        self::assertSame([], $this->links()->findLinks('contacts', 5));
+        self::assertSame([], $this->links()->findLinkedIds('contacts', 5, 'leads'));
     }
 
-    public function testFindLinksRejectsUnsupportedEntityType(): void
+    /** @dataProvider unsupportedTypes */
+    public function testFindLinkedIdsRejectsUnsupportedTypes(string $entityType, string $targetType): void
     {
-        $exception = self::exceptionFrom(fn () => $this->links()->findLinks('customers', 5));
+        $exception = self::exceptionFrom(fn () => $this->links()->findLinkedIds($entityType, 5, $targetType));
 
         self::assertInstanceOf(InvalidArgumentException::class, $exception);
         self::assertSame([], $this->requests());
     }
 
-    public function testFindActiveLeadsSkipsClosedLeadsAndOtherLinkTypes(): void
+    public function unsupportedTypes(): array
     {
-        $this->respond(['_embedded' => ['links' => [
-            ['to_entity_id' => 1, 'to_entity_type' => 'leads'],
-            ['to_entity_id' => 7, 'to_entity_type' => 'companies'],
-            ['to_entity_id' => 2, 'to_entity_type' => 'leads'],
-            ['to_entity_id' => 3, 'to_entity_type' => 'leads'],
-        ]]]);
-        $this->respond(self::page('leads', [
-            ['id' => 1, 'status_id' => 142],
-            ['id' => 2, 'status_id' => 555],
-            ['id' => 3, 'status_id' => 143],
-        ]));
-
-        self::assertSame([['id' => 2, 'status_id' => 555]], $this->links()->findActiveLeads('contacts', 5));
-        self::assertSame([
-            'GET /api/v4/contacts/5/links',
-            'GET /api/v4/leads?filter[id][0]=1&filter[id][1]=2&filter[id][2]=3&page=1&limit=3',
-        ], $this->requestLog());
+        return [
+            'сущность' => ['customers', 'leads'],
+            'цель' => ['leads', 'customers'],
+        ];
     }
 
-    public function testFindActiveLeadsWithOwnClosedStatuses(): void
-    {
-        $this->respond(['_embedded' => ['links' => [
-            ['to_entity_id' => 1, 'to_entity_type' => 'leads'],
-            ['to_entity_id' => 2, 'to_entity_type' => 'leads'],
-        ]]]);
-        $this->respond(self::page('leads', [['id' => 1, 'status_id' => 142], ['id' => 2, 'status_id' => 555]]));
-
-        self::assertSame(
-            [['id' => 1, 'status_id' => 142]],
-            $this->links()->findActiveLeads('contacts', 5, [555]),
-        );
-    }
-
-    public function testFindActiveLeadsForCompanyPassesWith(): void
-    {
-        $this->respond(['_embedded' => ['links' => [['to_entity_id' => 1, 'to_entity_type' => 'leads']]]]);
-        $this->respond(self::page('leads', [['id' => 1, 'status_id' => 555]]));
-
-        $leads = $this->links()->findActiveLeads('companies', 7, [142, 143], 'contacts');
-
-        self::assertSame([['id' => 1, 'status_id' => 555]], $leads);
-        self::assertSame([
-            'GET /api/v4/companies/7/links',
-            'GET /api/v4/leads?filter[id][0]=1&page=1&limit=1&with=contacts',
-        ], $this->requestLog());
-    }
-
-    public function testFindActiveLeadsWithoutLeadLinksSendsOneRequest(): void
-    {
-        $this->respond(['_embedded' => ['links' => [['to_entity_id' => 7, 'to_entity_type' => 'companies']]]]);
-
-        self::assertSame([], $this->links()->findActiveLeads('contacts', 5));
-        self::assertCount(1, $this->requests());
-    }
-
-    public function testFindMainContactForLead(): void
+    public function testFindMainContactId(): void
     {
         // Так отвечает живая amoCRM: в прочитанных связях признак зовётся main_contact.
         $this->respond(['_embedded' => ['links' => [
             ['to_entity_id' => 5, 'to_entity_type' => 'contacts', 'metadata' => ['main_contact' => false]],
             ['to_entity_id' => 6, 'to_entity_type' => 'contacts', 'metadata' => ['main_contact' => true]],
         ]]]);
-        $this->respond(['id' => 6, 'name' => 'Иван']);
 
-        self::assertSame(['id' => 6, 'name' => 'Иван'], $this->links()->findMainContactForLead(10, 'leads'));
-        self::assertSame([
-            'GET /api/v4/leads/10/links',
-            'GET /api/v4/contacts/6?with=leads',
-        ], $this->requestLog());
+        self::assertSame(6, $this->links()->findMainContactId(10));
+        self::assertSame(['GET /api/v4/leads/10/links'], $this->requestLog());
     }
 
-    public function testFindMainContactForLeadReturnsNullWithoutMainContact(): void
+    public function testFindMainContactIdReturnsNullWithoutMainContact(): void
     {
         $this->respond(['_embedded' => ['links' => [
             ['to_entity_id' => 5, 'to_entity_type' => 'contacts', 'metadata' => ['main_contact' => false]],
             ['to_entity_id' => 6, 'to_entity_type' => 'contacts'],
         ]]]);
 
-        self::assertNull($this->links()->findMainContactForLead(10));
-        self::assertCount(1, $this->requests());
+        self::assertNull($this->links()->findMainContactId(10));
     }
 
-    public function testFindMainContactForLeadIgnoresOtherLinkTypes(): void
+    public function testFindMainContactIdIgnoresOtherLinkTypes(): void
     {
         // Признак main_contact у связи с компанией контактом её не делает.
         $this->respond(['_embedded' => ['links' => [
             ['to_entity_id' => 7, 'to_entity_type' => 'companies', 'metadata' => ['main_contact' => true]],
         ]]]);
 
-        self::assertNull($this->links()->findMainContactForLead(10));
-        self::assertCount(1, $this->requests());
+        self::assertNull($this->links()->findMainContactId(10));
     }
 
     private function links(): Link

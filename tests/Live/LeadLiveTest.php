@@ -6,6 +6,7 @@ namespace Amocrm\Tests\Live;
 
 use Amocrm\Exception\ApiException;
 
+/** Сделки на живом аккаунте: создание, чтение, обновление и ошибки валидации. */
 final class LeadLiveTest extends LiveTestCase
 {
     public function testCreateReturnsIdAndRequestId(): void
@@ -41,6 +42,14 @@ final class LeadLiveTest extends LiveTestCase
         $leads = $this->amocrm()->leads()->find('filter[pipeline_id][0]=' . self::pipelineId() . '&order[id]=desc', 5);
 
         self::assertSame($this->leadId(), $leads[0]['id'] ?? null);
+    }
+
+    public function testFindByQueryFindsLeadByName(): void
+    {
+        $this->createdLead();
+        $leads = self::eventually(fn () => $this->amocrm()->leads()->findByQuery(self::runToken()));
+
+        self::assertContains($this->leadId(), array_column($leads, 'id'));
     }
 
     public function testFindByIdsDropsDuplicatesAndMissing(): void

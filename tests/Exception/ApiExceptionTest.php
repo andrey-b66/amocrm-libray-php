@@ -7,6 +7,7 @@ namespace Amocrm\Tests\Exception;
 use Amocrm\Exception\ApiException;
 use PHPUnit\Framework\TestCase;
 
+/** Исключение хранит детали запроса и ответа amoCRM. */
 final class ApiExceptionTest extends TestCase
 {
     public function testKeepsRequestDetails(): void
@@ -27,6 +28,14 @@ final class ApiExceptionTest extends TestCase
 
         self::assertSame([], $exception->getResponseData());
         self::assertSame([], $exception->getValidationErrors());
+        self::assertSame('', $exception->getRequestId());
+    }
+
+    public function testKeepsRequestId(): void
+    {
+        $exception = new ApiException('Ошибка', 400, 'POST', 'api/v4/leads', [], 'a614076704b6a3a3c4a8f15eca606239');
+
+        self::assertSame('a614076704b6a3a3c4a8f15eca606239', $exception->getRequestId());
     }
 
     public function testReturnsValidationErrors(): void

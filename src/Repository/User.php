@@ -7,45 +7,68 @@ namespace Amocrm\Repository;
 use Amocrm\Client\ApiClient;
 use Amocrm\Support\ApiReader;
 
-/** Репозиторий пользователей аккаунта amoCRM. */
+/**
+ * Репозиторий пользователей аккаунта amoCRM. Активность — в `rights.is_active`.
+ *
+ * $with — связанные данные через запятую: `role`, `group`, `uuid`, `amojo_id`,
+ * `user_rank`, `phone_number`.
+ */
 final class User
 {
     private const ENDPOINT = 'api/v4/users';
 
     private ApiClient $client;
 
+    /** Обычно репозиторий берут у фасада: $amocrm->users(). */
     public function __construct(ApiClient $apiClient)
     {
         $this->client = $apiClient;
     }
 
-    /** Получить всех пользователей со всех страниц API. Активность — в `rights.is_active`. */
-    public function getAll(): array
+    /**
+     * Получить всех пользователей со всех страниц.
+     *
+     * Пример: findAll('role,group')
+     */
+    public function findAll(string $with = ''): array
     {
-        return ApiReader::pages($this->client, self::ENDPOINT, 'users', '', ApiReader::MAX_PAGE_SIZE, null);
+        return ApiReader::pages(
+            $this->client,
+            self::ENDPOINT,
+            'users',
+            ApiReader::appendWith('', $with),
+            ApiReader::MAX_PAGE_SIZE,
+            null,
+        );
     }
 
-    public function getActive(): array
+    /** Получить активных пользователей. */
+    public function findActive(string $with = ''): array
     {
-        return $this->filterByActivity(true);
+        return $this->filterByActivity(true, $with);
     }
 
-    public function getDeactivated(): array
+    /** Получить деактивированных пользователей. */
+    public function findDeactivated(string $with = ''): array
     {
-        return $this->filterByActivity(false);
+        return $this->filterByActivity(false, $with);
     }
 
-    /** Найти пользователя по ID. Возвращает null, если пользователя нет. */
-    public function findById(int $userId): ?array
+    /** Найти пользователя по ID; null, если его нет. */
+    public function findById(int $userId, string $with = ''): ?array
     {
-        return ApiReader::one($this->client, self::ENDPOINT . '/' . $userId);
+        return ApiReader::one($this->client, self::ENDPOINT . '/' . $userId, ApiReader::appendWith('', $with));
     }
 
-    private function filterByActivity(bool $isActive): array
+    /**
+     * Отобрать пользователей по `rights.is_active`: фильтра по активности у amoCRM
+     * нет. Без этого признака пользователь не попадает ни в один список.
+     */
+    private function filterByActivity(bool $isActive, string $with): array
     {
         $users = [];
 
-        foreach ($this->getAll() as $user) {
+        foreach ($this->findAll($with) as $user) {
             if (($user['rights']['is_active'] ?? null) === $isActive) {
                 $users[] = $user;
             }

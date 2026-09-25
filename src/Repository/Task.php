@@ -25,28 +25,24 @@ final class Task extends AbstractApiRepository
     }
 
     /**
-     * Создать задачу, привязанную к сущности.
+     * Создать одну задачу, привязанную к сущности, и вернуть её.
      *
-     * Пример: createForEntity('leads', $leadId, [
-     *     'text' => 'Перезвонить клиенту',
-     *     'complete_till' => time() + 3600,
-     * ])
+     * Пример: createForEntity('leads', $leadId, ['text' => 'Перезвонить клиенту', 'complete_till' => time() + 3600])
      */
     public function createForEntity(string $entityType, int $entityId, array $data): array
     {
         $data['entity_type'] = EntityType::validate($entityType);
         $data['entity_id'] = $entityId;
 
-        // Задача здесь всегда одна, поэтому из списка создаётся и возвращается
-        // одна: create() работает списками, как и сама amoCRM.
         return $this->create([$data])[0] ?? [];
     }
 
     /**
-     * Получить задачи конкретной сущности.
+     * Получить задачи сущности: по умолчанию первую страницу (до 250), с $pages = null — все.
      *
-     * Пример: findForEntity('leads', $leadId, 'filter[is_completed]=0')
-     * Пример: findForEntity('leads', $leadId, '', 250, null) — все задачи сущности
+     * Пример: findForEntity('leads', $leadId, 'filter[is_completed]=0', 250, null)
+     *
+     * @param int|null $pages сколько страниц прочитать; null — все
      */
     public function findForEntity(
         string $entityType,

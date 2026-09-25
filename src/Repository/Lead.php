@@ -4,17 +4,32 @@ declare(strict_types=1);
 
 namespace Amocrm\Repository;
 
-/**
- * Репозиторий сделок amoCRM (сущность lead в API).
- *
- * Сделки связанного контакта или компании берут у репозитория связей:
- * links()->findLinks('contacts', $contactId) и
- * links()->findActiveLeads('contacts', $contactId).
- */
+/** Репозиторий сделок amoCRM. */
 final class Lead extends AbstractSearchableRepository
 {
-    /** Статусы «успешно реализовано» и «закрыто и не реализовано». */
+    /** Системные статусы закрытых сделок: 142 — успешно, 143 — не реализовано. */
     public const DEFAULT_CLOSED_STATUS_IDS = [142, 143];
+
+    /**
+     * Получить сделки по списку ID, кроме сделок со статусами из $excludedStatusIds.
+     *
+     * Пример: findActiveByIds([10, 20, 30])
+     */
+    public function findActiveByIds(
+        array $leadIds,
+        string $with = '',
+        array $excludedStatusIds = self::DEFAULT_CLOSED_STATUS_IDS
+    ): array {
+        $active = [];
+
+        foreach ($this->findByIds($leadIds, $with) as $lead) {
+            if (!in_array($lead['status_id'] ?? null, $excludedStatusIds, true)) {
+                $active[] = $lead;
+            }
+        }
+
+        return $active;
+    }
 
     protected function endpoint(): string
     {

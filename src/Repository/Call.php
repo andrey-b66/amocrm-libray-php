@@ -6,89 +6,126 @@ namespace Amocrm\Repository;
 
 use Amocrm\Client\ApiClient;
 use Amocrm\Exception\ApiException;
+use Amocrm\Support\ApiWriter;
 
 /**
- * Репозиторий регистрации звонков в amoCRM.
- *
- * amoCRM самостоятельно ищет связанную сущность по номеру `phone`.
- * Endpoint звонков не принимает прямую привязку через `entity_id`.
+ * Регистрация звонков. Контакт, компанию или сделку для звонка amoCRM находит
+ * сама по номеру `phone`; звонок на номер, которого нет в базе, не добавляется.
  */
 final class Call
 {
+    /** Входящий звонок — значение поля `direction`. */
     public const DIRECTION_INBOUND = 'inbound';
+
+    /** Исходящий звонок — значение поля `direction`. */
     public const DIRECTION_OUTBOUND = 'outbound';
 
     private const ENDPOINT = 'api/v4/calls';
 
     private ApiClient $client;
 
+    /** Обычно репозиторий берут у фасада: $amocrm->calls(). */
     public function __construct(ApiClient $apiClient)
     {
         $this->client = $apiClient;
     }
 
     /**
-     * Зарегистрировать звонок по данным формата amoCRM API v4.
+     * Зарегистрировать звонки: принимает список и возвращает список. Обязательны
+     * `phone`, `direction`, `duration` и `source`.
      *
-     * Направление задаётся полем `direction`: `inbound` или `outbound`.
+     * Если amoCRM отклонила хоть один звонок, бросается ApiException: принятые —
+     * в getResponseData()['_embedded']['calls'], отклонённые — в ['errors'].
      *
-     * Пример: create([
+     * Пример: create([[
      *     'phone' => '+79990000000',
-     *     'uniq' => 'call-2026-0001',
-     *     'source' => 'my-telephony',
      *     'direction' => Call::DIRECTION_INBOUND,
      *     'duration' => 125,
-     *     'call_status' => 4, // 1 сообщение, 2 перезвонить, 3 нет на месте, 4 разговор,
-     *     'call_result' => 'Разговор состоялся', // 5 неверный номер, 6 не дозвонился, 7 занято, 8 неизвестно
-     *     'link' => 'https://example.test/records/call-2026-0001.mp3',
-     * ])
+     *     'source' => 'my-telephony',
+     *     'uniq' => 'call-2026-0001',
+     *     'call_status' => 4, // 4 — разговор состоялся; всего статусов 7
+     * ]])
      */
-    public function create(array $data): array
+    public function create(array $calls): array
     {
-        $response = $this->client->post(self::ENDPOINT, [$data]);
-        $call = $response['_embedded']['calls'][0] ?? null;
+        $created = [];
 
-        if ($call === null) {
-            // Отклонённый звонок amoCRM кладёт в поле `errors`, а HTTP-код
-            // оставляет успешным: так бывает, когда по номеру не нашлось ни
-            // контакта, ни сделки. Без исключения это выглядело бы как успех.
-            throw new ApiException(
-                trim('amoCRM не приняла звонок. ' . self::errorDetail($response)),
-                200,
-                'POST',
-                self::ENDPOINT,
-                $response,
-            );
+        foreach (ApiWriter::batches($calls) as $batch) {
+            $response = $this->send($batch);
+            $accepted = $response['_embedded']['calls'] ?? [];
+
+            // Если принята только часть звонков, отклонённые amoCRM кладёт в `errors`,
+            // а HTTP-код оставляет успешным. Без исключения это выглядело бы успехом.
+            if (count($accepted) < count($batch)) {
+                throw self::rejected($batch, $response, 200, $this->client->lastRequestId());
+            }
+
+            foreach ($accepted as $call) {
+                $created[] = $call;
+            }
         }
 
-        return $call;
+        return $created;
     }
 
-    /** То же, что create(), но `direction` проставляется сам. */
+    /** Зарегистрировать один входящий звонок: `direction` проставляется сам. */
     public function createIncoming(array $data): array
     {
         $data['direction'] = self::DIRECTION_INBOUND;
 
-        return $this->create($data);
+        return $this->create([$data])[0];
     }
 
+    /** Зарегистрировать один исходящий звонок: `direction` проставляется сам. */
     public function createOutgoing(array $data): array
     {
         $data['direction'] = self::DIRECTION_OUTBOUND;
 
-        return $this->create($data);
+        return $this->create([$data])[0];
     }
 
-    /** Достать пояснение из поля `errors` ответа amoCRM. */
+    /**
+     * Отправить порцию звонков. Если не принят ни один, amoCRM отвечает HTTP 400
+     * с тем же `errors`, но без общего `detail` — причину достаёт rejected().
+     */
+    private function send(array $batch): array
+    {
+        try {
+            return $this->client->post(self::ENDPOINT, $batch);
+        } catch (ApiException $exception) {
+            $response = $exception->getResponseData();
+
+            if ($exception->getStatusCode() !== 400 || !isset($response['errors'])) {
+                throw $exception;
+            }
+
+            throw self::rejected($batch, $response, 400, $exception->getRequestId());
+        }
+    }
+
+    /** Исключение об отклонённых звонках с первым пояснением amoCRM. */
+    private static function rejected(array $batch, array $response, int $statusCode, string $requestId): ApiException
+    {
+        if (($response['_embedded']['calls'] ?? []) !== []) {
+            $message = 'amoCRM приняла не все звонки.';
+        } else {
+            $message = count($batch) === 1 ? 'amoCRM не приняла звонок.' : 'amoCRM не приняла звонки.';
+        }
+
+        return new ApiException(
+            trim($message . ' ' . self::errorDetail($response)),
+            $statusCode,
+            'POST',
+            self::ENDPOINT,
+            $response,
+            $requestId,
+        );
+    }
+
+    /** Первое пояснение `detail` из поля `errors` ответа amoCRM или пустая строка. */
     private static function errorDetail(array $response): string
     {
         foreach ($response['errors'] ?? [] as $error) {
-            foreach ($error['errors'] ?? [] as $reason) {
-                if (is_string($reason['detail'] ?? null)) {
-                    return $reason['detail'];
-                }
-            }
-
             if (is_string($error['detail'] ?? null)) {
                 return $error['detail'];
             }

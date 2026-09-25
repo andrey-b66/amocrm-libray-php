@@ -8,6 +8,7 @@ use Amocrm\Repository\Tag;
 use Amocrm\Tests\Fake\FakeAmocrmTestCase;
 use InvalidArgumentException;
 
+/** Справочник тегов и теги сущностей. */
 final class TagTest extends FakeAmocrmTestCase
 {
     public function testFindReadsTagDictionary(): void
@@ -41,13 +42,32 @@ final class TagTest extends FakeAmocrmTestCase
         self::assertSame(['GET /api/v4/contacts/tags?page=1&limit=250'], $this->requestLog());
     }
 
-    public function testCreate(): void
+    public function testCreateSendsListAndReturnsTags(): void
     {
-        $this->respond(['_embedded' => ['tags' => [['id' => 5, 'name' => 'Важная заявка']]]]);
+        $this->respond(['_embedded' => ['tags' => [
+            ['id' => 5, 'name' => 'Важная заявка', 'request_id' => 'a'],
+            ['id' => 6, 'name' => 'Повторный клиент', 'request_id' => 'b'],
+        ]]]);
 
-        self::assertSame(['id' => 5, 'name' => 'Важная заявка'], $this->tags()->create('leads', ['name' => 'Важная заявка']));
+        $tags = [
+            ['name' => 'Важная заявка', 'request_id' => 'a'],
+            ['name' => 'Повторный клиент', 'request_id' => 'b'],
+        ];
+
+        self::assertSame([
+            ['id' => 5, 'name' => 'Важная заявка', 'request_id' => 'a'],
+            ['id' => 6, 'name' => 'Повторный клиент', 'request_id' => 'b'],
+        ], $this->tags()->create('leads', $tags));
         self::assertSame(['POST /api/v4/leads/tags'], $this->requestLog());
-        self::assertSame([['name' => 'Важная заявка']], $this->lastRequest()['body']);
+        self::assertSame($tags, $this->lastRequest()['body']);
+    }
+
+    public function testCreateRejectsSingleTagInsteadOfList(): void
+    {
+        $exception = self::exceptionFrom(fn () => $this->tags()->create('leads', ['name' => 'Важная заявка']));
+
+        self::assertInstanceOf(InvalidArgumentException::class, $exception);
+        self::assertSame([], $this->requests());
     }
 
     public function testAddToEntityAcceptsIdsNamesAndRawTags(): void

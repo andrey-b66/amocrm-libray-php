@@ -6,19 +6,16 @@ namespace Amocrm\Support;
 
 use InvalidArgumentException;
 
-/** Поддерживаемые типы сущностей для примечаний, задач и связей. */
+/** Типы сущностей для примечаний, задач, тегов и связей — в том виде, как в пути API. */
 final class EntityType
 {
     public const CONTACT = 'contacts';
     public const LEAD = 'leads';
     public const COMPANY = 'companies';
 
-    private const SUPPORTED = [
-        self::CONTACT,
-        self::LEAD,
-        self::COMPANY,
-    ];
+    private const SUPPORTED = [self::CONTACT, self::LEAD, self::COMPANY];
 
+    /** Вернуть тип как есть, если он поддерживается; иначе InvalidArgumentException. */
     public static function validate(string $entityType): string
     {
         if (!in_array($entityType, self::SUPPORTED, true)) {
@@ -30,6 +27,7 @@ final class EntityType
         return $entityType;
     }
 
+    /** Экземпляры не нужны: у класса только константы и статический метод. */
     private function __construct()
     {
     }

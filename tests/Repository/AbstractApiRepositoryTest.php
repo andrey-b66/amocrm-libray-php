@@ -10,7 +10,6 @@ use Amocrm\Repository\AbstractSearchableRepository;
 use Amocrm\Repository\Company;
 use Amocrm\Repository\Contact;
 use Amocrm\Repository\Lead;
-use Amocrm\Repository\Pipeline;
 use Amocrm\Repository\Task;
 use Amocrm\Tests\Fake\FakeAmocrmTestCase;
 use InvalidArgumentException;
@@ -36,14 +35,13 @@ final class AbstractApiRepositoryTest extends FakeAmocrmTestCase
             'контакты' => [fn (Amocrm $amocrm) => $amocrm->contacts(), '/api/v4/contacts', 'contacts'],
             'сделки' => [fn (Amocrm $amocrm) => $amocrm->leads(), '/api/v4/leads', 'leads'],
             'компании' => [fn (Amocrm $amocrm) => $amocrm->companies(), '/api/v4/companies', 'companies'],
-            'воронки' => [fn (Amocrm $amocrm) => $amocrm->pipelines(), '/api/v4/leads/pipelines', 'pipelines'],
             'задачи' => [fn (Amocrm $amocrm) => $amocrm->tasks(), '/api/v4/tasks', 'tasks'],
         ];
     }
 
     /**
-     * У задач и воронок amoCRM не знает ни `query`, ни пользовательских полей
-     * и на такой поиск молча отдала бы всю выборку.
+     * У задач amoCRM не знает ни `query`, ни пользовательских полей и на такой
+     * поиск молча отдала бы всю выборку.
      *
      * @dataProvider searchSupport
      */
@@ -61,7 +59,6 @@ final class AbstractApiRepositoryTest extends FakeAmocrmTestCase
             'компании' => [Company::class, true],
             'сделки' => [Lead::class, true],
             'задачи' => [Task::class, false],
-            'воронки' => [Pipeline::class, false],
         ];
     }
 
@@ -423,6 +420,7 @@ final class AbstractApiRepositoryTest extends FakeAmocrmTestCase
         return $this->amocrm()->contacts();
     }
 
+    /** Список из $count контактов: «Контакт 1», «Контакт 2»… */
     private static function entities(int $count): array
     {
         $entities = [];

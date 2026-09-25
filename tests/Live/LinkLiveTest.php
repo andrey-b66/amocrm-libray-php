@@ -4,83 +4,66 @@ declare(strict_types=1);
 
 namespace Amocrm\Tests\Live;
 
+/** Связи между сделкой, контактом и компанией на живом аккаунте. */
 final class LinkLiveTest extends LiveTestCase
 {
     /**
-     * Сделка, контакт и компания прогона связываются друг с другом, читаются
-     * со всех сторон и в конце отвязываются, как бы ни прошли проверки.
+     * Сделка, контакт и компания прогона связываются попарно, связи читаются с обеих
+     * сторон, а в конце снимаются, как бы ни прошли проверки.
      */
-    public function testLinksBetweenLeadContactAndCompany(): void
+    public function testLinkAndUnlinkLeadContactAndCompany(): void
     {
         $links = $this->amocrm()->links();
         $leadId = $this->leadId();
         $contactId = $this->contactId();
         $companyId = $this->companyId();
 
-        self::assertSame([], $links->findLinks('leads', $leadId), 'У новой сделки нет связей.');
-        self::assertNull($links->findMainContactForLead($leadId));
+        self::assertSame([], $links->findLinkedIds('leads', $leadId, 'contacts'), 'У новой сделки нет контактов.');
+        self::assertSame([], $links->findLinkedIds('leads', $leadId, 'companies'), 'У новой сделки нет компаний.');
+        self::assertNull($links->findMainContactId($leadId));
 
         try {
-            $links->linkContactToLead($contactId, $leadId, true);
-            $links->linkCompanyToLead($companyId, $leadId);
-            $links->linkContactToCompany($contactId, $companyId);
+            $contactLink = $links->linkContactToLead($contactId, $leadId, true);
+            $companyLink = $links->linkCompanyToLead($companyId, $leadId);
+            $contactCompanyLink = $links->linkContactToCompany($contactId, $companyId);
 
-            $leadLinks = $links->findLinks('leads', $leadId);
-            self::assertContains("contacts:$contactId", self::pairs($leadLinks));
-            self::assertContains("companies:$companyId", self::pairs($leadLinks));
-
+            // Методы привязки возвращают созданную связь.
+            self::assertSame([$contactId, 'contacts'], [$contactLink['to_entity_id'] ?? null, $contactLink['to_entity_type'] ?? null]);
+            self::assertSame([$companyId, 'companies'], [$companyLink['to_entity_id'] ?? null, $companyLink['to_entity_type'] ?? null]);
             self::assertSame(
-                $contactId,
-                $links->findMainContactForLead($leadId)['id'] ?? null,
-                'Главный контакт читается из metadata.main_contact.',
+                [$contactId, 'contacts'],
+                [$contactCompanyLink['to_entity_id'] ?? null, $contactCompanyLink['to_entity_type'] ?? null],
             );
 
-            // Связь видна с любой стороны.
-            self::assertContains("leads:$leadId", self::pairs($links->findLinks('contacts', $contactId)));
-            self::assertContains("contacts:$contactId", self::pairs($links->findLinks('companies', $companyId)));
+            // Каждая связь видна с обеих сторон.
+            self::assertSame([$contactId], $links->findLinkedIds('leads', $leadId, 'contacts'));
+            self::assertContains($leadId, $links->findLinkedIds('contacts', $contactId, 'leads'));
+            self::assertSame([$companyId], $links->findLinkedIds('leads', $leadId, 'companies'));
+            self::assertContains($leadId, $links->findLinkedIds('companies', $companyId, 'leads'));
+            self::assertSame([$companyId], $links->findLinkedIds('contacts', $contactId, 'companies'));
+            self::assertSame([$contactId], $links->findLinkedIds('companies', $companyId, 'contacts'));
 
-            // Сущности по ID связей грузит их собственный репозиторий.
-            $contacts = $this->amocrm()->contacts()->findByIds(self::idsOfType($leadLinks, 'contacts'));
+            self::assertSame($contactId, $links->findMainContactId($leadId), 'Контакт привязан главным.');
+
+            // Сущности по ID связей загружают их репозитории.
+            $contacts = $this->amocrm()->contacts()->findByIds($links->findLinkedIds('leads', $leadId, 'contacts'));
             self::assertSame([$contactId], array_column($contacts, 'id'));
 
-            self::assertContains(
-                $leadId,
-                array_column($links->findActiveLeads('contacts', $contactId), 'id'),
-                'Сделка на открытом этапе считается активной.',
-            );
-            self::assertContains($leadId, array_column($links->findActiveLeads('companies', $companyId), 'id'));
+            $activeLeads = $this->amocrm()->leads()->findActiveByIds($links->findLinkedIds('contacts', $contactId, 'leads'));
+            self::assertContains($leadId, array_column($activeLeads, 'id'), 'Сделка на открытом этапе считается активной.');
         } finally {
             $links->unlinkContactFromLead($contactId, $leadId);
             $links->unlinkCompanyFromLead($companyId, $leadId);
             $links->unlinkContactFromCompany($contactId, $companyId);
         }
 
-        self::assertSame([], $links->findLinks('leads', $leadId), 'Связи сделки сняты.');
-        self::assertSame([], $links->findLinks('contacts', $contactId), 'Связи контакта сняты.');
-    }
-
-    /** Связи строками `тип:ID` — так их удобно сравнивать. */
-    private static function pairs(array $links): array
-    {
-        $pairs = [];
-
-        foreach ($links as $link) {
-            $pairs[] = $link['to_entity_type'] . ':' . $link['to_entity_id'];
-        }
-
-        return $pairs;
-    }
-
-    private static function idsOfType(array $links, string $entityType): array
-    {
-        $ids = [];
-
-        foreach ($links as $link) {
-            if ($link['to_entity_type'] === $entityType) {
-                $ids[] = $link['to_entity_id'];
-            }
-        }
-
-        return $ids;
+        // После отвязки связей нет ни с одной стороны.
+        self::assertSame([], $links->findLinkedIds('leads', $leadId, 'contacts'), 'Контакт отвязан от сделки.');
+        self::assertNotContains($leadId, $links->findLinkedIds('contacts', $contactId, 'leads'));
+        self::assertSame([], $links->findLinkedIds('leads', $leadId, 'companies'), 'Компания отвязана от сделки.');
+        self::assertNotContains($leadId, $links->findLinkedIds('companies', $companyId, 'leads'));
+        self::assertSame([], $links->findLinkedIds('contacts', $contactId, 'companies'), 'Контакт отвязан от компании.');
+        self::assertSame([], $links->findLinkedIds('companies', $companyId, 'contacts'));
+        self::assertNull($links->findMainContactId($leadId), 'Главного контакта больше нет.');
     }
 }

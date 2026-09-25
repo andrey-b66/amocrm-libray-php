@@ -19,6 +19,7 @@ use Amocrm\Repository\User;
 use InvalidArgumentException;
 use PHPUnit\Framework\TestCase;
 
+/** Фасад отдаёт репозитории и общий API-клиент. */
 final class AmocrmTest extends TestCase
 {
     /** @dataProvider repositories */

@@ -8,8 +8,8 @@ use Amocrm\Client\ApiClient;
 use Amocrm\Exception\ApiException;
 use Amocrm\Tests\Fake\FakeAmocrmTestCase;
 use InvalidArgumentException;
-use ReflectionProperty;
 
+/** HTTP-клиент: тело и заголовки запросов, адреса, ответы, ошибки и настройки. */
 final class ApiClientTest extends FakeAmocrmTestCase
 {
     /** @dataProvider writeMethods */
@@ -47,7 +47,6 @@ final class ApiClientTest extends FakeAmocrmTestCase
         return [
             'post' => ['post'],
             'patch' => ['patch'],
-            'put' => ['put'],
         ];
     }
 
@@ -94,8 +93,8 @@ final class ApiClientTest extends FakeAmocrmTestCase
             'слеш в начале эндпоинта' => ['/api/v4/leads', '', '/api/v4/leads'],
             'скобки' => [
                 'api/v4/leads',
-                'filter[status_id][0]=143&limit=50',
-                '/api/v4/leads?filter%5Bstatus_id%5D%5B0%5D=143&limit=50',
+                'filter[pipeline_id][0]=10739150&limit=50',
+                '/api/v4/leads?filter%5Bpipeline_id%5D%5B0%5D=10739150&limit=50',
             ],
             'кириллица и пробел' => [
                 'api/v4/contacts',
@@ -141,12 +140,13 @@ final class ApiClientTest extends FakeAmocrmTestCase
             'detail' => 'Поле name обязательно',
             'validation-errors' => [['request_id' => '0', 'errors' => [['path' => 'name']]]],
         ];
-        $this->respond($responseData, 400);
+        $this->respond($responseData, 400, ['X-Request-Id' => 'a614076704b6a3a3c4a8f15eca606239']);
 
         $exception = self::exceptionFrom(fn () => $this->client()->post('api/v4/leads', [['price' => 1]]));
 
         self::assertInstanceOf(ApiException::class, $exception);
         self::assertSame('amoCRM отклонила данные запроса. Поле name обязательно', $exception->getMessage());
+        self::assertSame('a614076704b6a3a3c4a8f15eca606239', $exception->getRequestId());
         self::assertSame(400, $exception->getStatusCode());
         self::assertSame(400, $exception->getCode());
         self::assertSame('POST', $exception->getHttpMethod());
@@ -170,7 +170,7 @@ final class ApiClientTest extends FakeAmocrmTestCase
     public function errorStatuses(): array
     {
         return [
-            '401' => [401, 'Долгосрочный токен amoCRM недействителен или отозван.'],
+            '401' => [401, 'Токен amoCRM истёк, недействителен или отозван.'],
             '402' => [402, 'Аккаунт amoCRM не оплачен или возможность не входит в тариф.'],
             // Тем же кодом amoCRM отвечает на блокировку за частые запросы.
             '403' => [403, 'amoCRM отклонила запрос: недостаточно прав или аккаунт заблокирован.'],
@@ -193,9 +193,28 @@ final class ApiClientTest extends FakeAmocrmTestCase
 
         self::assertInstanceOf(ApiException::class, $exception);
         self::assertStringStartsWith('Не удалось выполнить запрос к amoCRM.', $exception->getMessage());
+        // Код cURL есть всегда, даже при пустом описании: 7 — не удалось соединиться.
+        self::assertStringEndsWith('Код cURL: 7.', $exception->getMessage());
         self::assertSame(0, $exception->getStatusCode());
         self::assertSame('GET', $exception->getHttpMethod());
         self::assertSame('api/v4/leads', $exception->getEndpoint());
+        self::assertSame('', $exception->getRequestId(), 'Ответа не было — и ID запроса нет.');
+    }
+
+    public function testRemembersRequestIdOfEachResponse(): void
+    {
+        // Регистр заголовка у разных серверов разный.
+        $this->respond(['id' => 1], 200, ['x-request-id' => ' id-1 ']);
+        $this->respond([]);
+        $client = $this->client();
+
+        self::assertSame('', $client->lastRequestId(), 'До первого запроса ID нет.');
+
+        $client->get('api/v4/leads/1');
+        self::assertSame('id-1', $client->lastRequestId());
+
+        $client->get('api/v4/leads/2');
+        self::assertSame('', $client->lastRequestId(), 'ID прошлого ответа не переносится на следующий.');
     }
 
     public function testInvalidUtf8ThrowsBeforeSending(): void
@@ -250,20 +269,30 @@ final class ApiClientTest extends FakeAmocrmTestCase
         new ApiClient($domain, $token);
     }
 
+    public function invalidCredentials(): array
+    {
+        return [
+            'пустой домен' => ['', 'token'],
+            'домен из одной схемы' => ['https://', 'token'],
+            'пустой токен' => ['example.amocrm.ru', ''],
+            'токен из пробелов' => ['example.amocrm.ru', '   '],
+        ];
+    }
+
     public function testUsesGivenTimeouts(): void
     {
         $client = new ApiClient('example.amocrm.ru', 'token', 90, 5);
 
-        self::assertSame(90, self::privateValue($client, 'timeout'));
-        self::assertSame(5, self::privateValue($client, 'connectTimeout'));
+        self::assertSame(90, self::privateProperty($client, 'timeout'));
+        self::assertSame(5, self::privateProperty($client, 'connectTimeout'));
     }
 
     public function testDefaultTimeouts(): void
     {
         $client = new ApiClient('example.amocrm.ru', 'token');
 
-        self::assertSame(ApiClient::DEFAULT_TIMEOUT, self::privateValue($client, 'timeout'));
-        self::assertSame(ApiClient::DEFAULT_CONNECT_TIMEOUT, self::privateValue($client, 'connectTimeout'));
+        self::assertSame(ApiClient::DEFAULT_TIMEOUT, self::privateProperty($client, 'timeout'));
+        self::assertSame(ApiClient::DEFAULT_CONNECT_TIMEOUT, self::privateProperty($client, 'connectTimeout'));
     }
 
     /** @dataProvider invalidTimeouts */
@@ -281,24 +310,6 @@ final class ApiClientTest extends FakeAmocrmTestCase
             'ноль на ответ' => [0, 10],
             'минус на ответ' => [-1, 10],
             'ноль на соединение' => [30, 0],
-        ];
-    }
-
-    private static function privateValue(ApiClient $client, string $property): int
-    {
-        $reflection = new ReflectionProperty($client, $property);
-        $reflection->setAccessible(true);
-
-        return $reflection->getValue($client);
-    }
-
-    public function invalidCredentials(): array
-    {
-        return [
-            'пустой домен' => ['', 'token'],
-            'домен из одной схемы' => ['https://', 'token'],
-            'пустой токен' => ['example.amocrm.ru', ''],
-            'токен из пробелов' => ['example.amocrm.ru', '   '],
         ];
     }
 }
